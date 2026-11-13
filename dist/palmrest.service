@@ -15,7 +15,7 @@
 # `After=` and `Wants=` of a unit that is not installed are ignored by systemd.
 [Unit]
 Description=palmrest: Magic Mouse gestures (scroll, swipes, double-taps)
-Documentation=https://github.com/PoHsuanLai/palmrest
+Documentation=https://github.com/Bardo-DE/palmrest
 Wants=turnstile.socket
 After=turnstile.socket
 StartLimitIntervalSec=60
