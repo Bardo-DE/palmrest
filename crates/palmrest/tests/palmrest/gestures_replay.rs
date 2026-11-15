@@ -1,14 +1,32 @@
 //! Acceptance 12.8 items 4-7, and the replay half of 10, with the shipped configuration
-//! (rejection on, touchpad output): swipe trigger, double-taps, one-finger swipe, rejection,
-//! suppression.
+//! (rejection on, touchpad output): the remapped swipe's trigger, double-taps, one-finger swipe,
+//! rejection, suppression. The live Spaces swipe on the touchpad is in `pad_strokes`.
 
-use palmrest::action::Action;
+use palmrest::action::{Action, Gesture};
 use palmrest::config::Config;
 use palmrest::keys::{Key, KeyCombo};
 use palmrest::replay::{Timing, feed, outs, replay};
 use palmrest::stamp::StampClock;
 use palmrest::{Out, Tracker};
 use palmrest_protocol::{Axis, LockState, Over, Phase, TapKind, ToHost, Workspace};
+
+/// The shipped settings with both two-finger swipes mapped the other way round: not the
+/// workspace defaults, so the swipe is not live on the touchpad and fires its action instead.
+fn remapped() -> Config {
+    let mut cfg = Config::default();
+    cfg.gestures.gesture_action_map = cfg
+        .gestures
+        .gesture_action_map
+        .with(
+            Gesture::TwoFingerSwipeRight,
+            Action::Workspace(Workspace::Next),
+        )
+        .with(
+            Gesture::TwoFingerSwipeLeft,
+            Action::Workspace(Workspace::Prev),
+        );
+    cfg
+}
 
 fn run(name: &str) -> Vec<Out> {
     outs(&replay(
@@ -24,10 +42,19 @@ fn run_claimed(name: &str) -> Vec<Out> {
     run_from(t, name)
 }
 
-/// Replays with the session locked from the start.
+/// Replays the remapped settings.
+fn run_remapped(name: &str) -> Vec<Out> {
+    outs(&replay(
+        &crate::support::load(name),
+        remapped(),
+        Timing::Arrival,
+    ))
+}
+
+/// Replays the remapped settings with the session locked from the start.
 fn run_locked(name: &str) -> Vec<Out> {
     run_from(
-        Tracker::new(Config::default()).with_session_lock(LockState::Locked),
+        Tracker::new(remapped()).with_session_lock(LockState::Locked),
         name,
     )
 }
@@ -85,18 +112,26 @@ fn taps(outs: &[Out]) -> Vec<TapKind> {
 
 #[test]
 fn swipe_trigger() {
+    // Fingers right: the mapping of `remapped`, which is the other way round from the default.
     const CASES: &[(&str, &[Action])] = &[
-        ("swipe_200_right", &[Action::Workspace(Workspace::Prev)]),
-        ("swipe_200_left", &[Action::Workspace(Workspace::Next)]),
+        ("swipe_200_right", &[Action::Workspace(Workspace::Next)]),
+        ("swipe_200_left", &[Action::Workspace(Workspace::Prev)]),
         ("swipe_199", &[]),
         (
             "swipe_vertical_then_horizontal",
-            &[Action::Workspace(Workspace::Prev)],
+            &[Action::Workspace(Workspace::Next)],
         ),
-        ("swipe_600_fast", &[Action::Workspace(Workspace::Prev)]),
+        ("swipe_600_fast", &[Action::Workspace(Workspace::Next)]),
     ];
     for &(name, want) in CASES {
-        assert_eq!(actions(&run(name)), want, "{name}");
+        assert_eq!(actions(&run_remapped(name)), want, "{name}");
+    }
+}
+
+#[test]
+fn the_default_mapping_fires_nothing_because_the_swipe_is_live_on_the_pad() {
+    for name in ["swipe_200_right", "swipe_200_left", "swipe_600_fast"] {
+        assert!(actions(&run(name)).is_empty(), "{name}");
     }
 }
 
@@ -104,7 +139,7 @@ fn swipe_trigger() {
 fn vertical_then_horizontal_fires_only_after_the_further_200() {
     let steps = replay(
         &crate::support::load("swipe_vertical_then_horizontal"),
-        Config::default(),
+        remapped(),
         Timing::Arrival,
     );
     let fired_at: Vec<u64> = steps
@@ -112,23 +147,28 @@ fn vertical_then_horizontal_fires_only_after_the_further_200() {
         .filter(|s| !actions(&s.outs).is_empty())
         .map(|s| s.at.0 / 1_000_000)
         .collect();
-    // 160 vertical (to 240 ms), 160 horizontal (to 492 ms): nothing. The further 200 completes
-    // 40 units into the third stroke, at 504 + 5 x 12 ms.
-    assert_eq!(fired_at, [564]);
+    // 160 vertical (to 240 ms) lock Y, and the sideways strokes after it do not count until the
+    // lock times out, 250 ms after the last vertical motion (492 ms). The sideways motion then
+    // locks at 552 ms (40 units) and its 200 units complete 20 reports later.
+    assert_eq!(fired_at, [792]);
 }
 
 #[test]
-fn a_two_finger_swipe_never_scrolls_sideways() {
+fn a_two_finger_swipe_never_scrolls_sideways_and_lands_four_contacts() {
     let all = run("swipe_600_fast");
     assert!(
         crate::support::scrolls(&all)
             .iter()
             .all(|s| s.2 != Some(Axis::X))
     );
-    assert!(
-        !all.iter().any(|o| matches!(o, Out::Pad(_))),
-        "Blocked contacts never reach the touchpad"
-    );
+    let lands: Vec<_> = all
+        .iter()
+        .filter_map(|o| match o {
+            Out::Pad(palmrest::outputs::pad::PadFrame::Land { fingers, .. }) => Some(*fingers),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(lands, [4], "one swipe, four contacts, no scroll pair");
 }
 
 // ---- 5. Double-taps -----------------------------------------------------------------------
@@ -199,7 +239,7 @@ fn one_finger_swipe() {
 #[test]
 fn a_locked_session_runs_no_gesture_effect() {
     for name in ["swipe_200_right", "tap_two_double", "g4_fast"] {
-        let free = run(name);
+        let free = run_remapped(name);
         assert!(
             !actions(&free).is_empty() || !keys(&free).is_empty(),
             "{name}: the unlocked run fires something"

@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 
 mod case_points;
+pub mod mm;
 pub mod scenarios;
 mod sessions;
 mod strokes;

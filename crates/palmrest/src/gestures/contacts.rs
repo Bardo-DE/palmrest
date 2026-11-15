@@ -5,13 +5,19 @@
 mod rejection;
 
 use super::bands::Bands;
-use crate::feel::Sample;
 use crate::sensor::FrameContact;
 use crate::sensor::lattice;
 use crate::time::Mono;
-use crate::touch::TouchId;
+use crate::touch::{Point, TouchId};
 pub use rejection::Contact;
 use rejection::{Touch, Track, advance, land};
+
+/// A contact the gestures follow: its id and where it is now, on the grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Sample {
+    pub id: TouchId,
+    pub at: Point,
+}
 
 /// Every live track and the contact set of the previous report.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

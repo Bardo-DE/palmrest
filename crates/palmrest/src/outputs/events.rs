@@ -69,6 +69,9 @@ pub struct PadEncoder {
 
 impl PadEncoder {
     /// The events of one frame.
+    ///
+    /// A landing while contacts are still down lifts them first, so `BTN_TOOL_*` never changes
+    /// from one finger count to another without every contact having lifted.
     pub fn encode(self, f: &PadFrame) -> (Self, Vec<InputEvent>) {
         match *f {
             PadFrame::Land {
@@ -76,60 +79,71 @@ impl PadEncoder {
                 at,
                 spacing,
             } => {
+                let (idle, lifted) = self.lift();
                 let fingers = fingers.clamp(2, PAD_SLOTS);
                 let s = Self {
                     fingers,
                     spacing,
-                    next_tracking_id: self.next_tracking_id.wrapping_add(i32::from(fingers))
+                    next_tracking_id: idle.next_tracking_id.wrapping_add(i32::from(fingers))
                         & 0xffff,
                 };
-                let mut out = Vec::new();
-                for (slot, x) in s.xs(at.x) {
-                    out.extend([
+                let landed = s.xs(at.x).flat_map(|(slot, x)| {
+                    [
                         ev(EV_ABS, ABS_MT_SLOT, slot),
                         ev(
                             EV_ABS,
                             ABS_MT_TRACKING_ID,
-                            (self.next_tracking_id + slot) & 0xffff,
+                            (idle.next_tracking_id + slot) & 0xffff,
                         ),
                         ev(EV_ABS, ABS_MT_POSITION_X, x),
                         ev(EV_ABS, ABS_MT_POSITION_Y, at.y),
-                    ]);
-                }
-                out.extend([ev(EV_KEY, BTN_TOUCH, 1), ev(EV_KEY, tool(fingers), 1)]);
-                out.extend(s.single(at.x, at.y));
+                    ]
+                });
+                let out = lifted
+                    .into_iter()
+                    .chain(landed)
+                    .chain([ev(EV_KEY, BTN_TOUCH, 1), ev(EV_KEY, tool(fingers), 1)])
+                    .chain(s.single(at.x, at.y))
+                    .collect();
                 (s, out)
             }
             PadFrame::Move { at } => {
-                let mut out = Vec::new();
-                for (slot, x) in self.xs(at.x) {
-                    out.extend([
-                        ev(EV_ABS, ABS_MT_SLOT, slot),
-                        ev(EV_ABS, ABS_MT_POSITION_X, x),
-                        ev(EV_ABS, ABS_MT_POSITION_Y, at.y),
-                    ]);
-                }
-                out.extend(self.single(at.x, at.y));
+                let out = self
+                    .xs(at.x)
+                    .flat_map(|(slot, x)| {
+                        [
+                            ev(EV_ABS, ABS_MT_SLOT, slot),
+                            ev(EV_ABS, ABS_MT_POSITION_X, x),
+                            ev(EV_ABS, ABS_MT_POSITION_Y, at.y),
+                        ]
+                    })
+                    .chain(self.single(at.x, at.y))
+                    .collect();
                 (self, out)
             }
-            PadFrame::Lift => {
-                let mut out = Vec::new();
-                for slot in 0..i32::from(self.fingers) {
-                    out.extend([
-                        ev(EV_ABS, ABS_MT_SLOT, slot),
-                        ev(EV_ABS, ABS_MT_TRACKING_ID, -1),
-                    ]);
-                }
-                if self.fingers > 0 {
-                    out.extend([
-                        ev(EV_KEY, BTN_TOUCH, 0),
-                        ev(EV_KEY, tool(self.fingers), 0),
-                        SYN,
-                    ]);
-                }
-                (Self { fingers: 0, ..self }, out)
-            }
+            PadFrame::Lift => self.lift(),
         }
+    }
+
+    /// Every contact up, the tool off and a report: nothing at all when nothing is down.
+    fn lift(self) -> (Self, Vec<InputEvent>) {
+        if self.fingers == 0 {
+            return (self, vec![]);
+        }
+        let out = (0..i32::from(self.fingers))
+            .flat_map(|slot| {
+                [
+                    ev(EV_ABS, ABS_MT_SLOT, slot),
+                    ev(EV_ABS, ABS_MT_TRACKING_ID, -1),
+                ]
+            })
+            .chain([
+                ev(EV_KEY, BTN_TOUCH, 0),
+                ev(EV_KEY, tool(self.fingers), 0),
+                SYN,
+            ])
+            .collect();
+        (Self { fingers: 0, ..self }, out)
     }
 
     /// Slot numbers and x positions: contacts spread evenly around the centre.
@@ -211,6 +225,43 @@ mod tests {
         assert_eq!(lift.last(), Some(&SYN));
         let (_, again) = p.encode(&PadFrame::Lift);
         assert!(again.is_empty(), "lifting nothing writes nothing");
+    }
+
+    #[test]
+    fn the_tool_never_changes_without_every_contact_lifting() {
+        let land = |fingers| PadFrame::Land {
+            fingers,
+            at: CENTRE,
+            spacing: 480,
+        };
+        let (p, _) = PadEncoder::default().encode(&land(2));
+        let (_, out) = p.encode(&land(4));
+        let at = |want: InputEvent| out.iter().position(|e| *e == want).expect("event");
+        assert!(
+            at(ev(EV_KEY, BTN_TOOL_DOUBLETAP, 0)) < at(ev(EV_KEY, BTN_TOOL_QUADTAP, 1)),
+            "the two-finger tool is off before the four-finger tool is on"
+        );
+        let slots_up = out
+            .iter()
+            .filter(|e| e.code == ABS_MT_TRACKING_ID && e.value == -1)
+            .count();
+        assert_eq!(slots_up, 2);
+    }
+
+    #[test]
+    fn four_contacts_spread_evenly_around_the_centre() {
+        let (_, land) = PadEncoder::default().encode(&PadFrame::Land {
+            fingers: 4,
+            at: CENTRE,
+            spacing: 480,
+        });
+        let xs: Vec<i32> = land
+            .iter()
+            .filter(|e| e.code == ABS_MT_POSITION_X)
+            .map(|e| e.value)
+            .collect();
+        assert_eq!(xs, [1280, 1760, 2240, 2720]);
+        assert!(land.contains(&ev(EV_KEY, BTN_TOOL_QUADTAP, 1)));
     }
 
     #[test]

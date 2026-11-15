@@ -1,16 +1,11 @@
-//! The scroll feel shared by every output: axis lock, acceleration, px.
+//! The scroll feel: every transfer function from the fingers' millimetres to an output, one
+//! function per sink. The recogniser (`gestures::stroke`) says what the fingers did in
+//! millimetres; nothing outside this module turns that into pixels or pad distance.
+//!
+//! - `shell`: millimetres to the px the shell's own surfaces scroll (`ToHost::Scroll`).
+//! - `pad`: millimetres to the distance the virtual touchpad's fingers move, for every other
+//!   client, whose scroll feel libinput owns.
 
 pub mod curve;
-pub mod gain;
-pub mod lock;
-pub mod lock_event;
-pub mod natural;
-pub mod quantize;
-pub mod rule;
-
-pub use gain::HI_RES_PER_DETENT;
-pub use lock::AxisLock;
-pub use lock_event::{Hold, LockEvent, Move, Sample};
-pub use natural::{NaturalScroll, offset_delta};
-pub use quantize::{Quantized, Quantizer};
-pub use rule::{Lock, LockParams, Threshold};
+pub mod pad;
+pub mod shell;

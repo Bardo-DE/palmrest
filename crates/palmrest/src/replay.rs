@@ -4,7 +4,7 @@
 //! bytes to outputs, not a test-only shortcut.
 
 use crate::config::Config;
-use crate::feel::Lock;
+use crate::gestures::Intent;
 use crate::recording::{Record, RecordedSource};
 use crate::sensor::{MagicMouseHid, Sensor, SensorError};
 use crate::stamp::StampClock;
@@ -25,8 +25,8 @@ pub enum Timing {
 pub struct Step {
     pub at: Mono,
     pub outs: Vec<Out>,
-    /// The scroll lock decision after this record.
-    pub lock: Lock,
+    /// What the stroke recogniser had decided after this record.
+    pub intent: Option<Intent>,
     pub error: Option<SensorError>,
 }
 
@@ -85,7 +85,7 @@ fn ticks_until(mut tracker: Tracker, until: Option<Mono>) -> (Tracker, Vec<Step>
             steps.push(Step {
                 at: d,
                 outs,
-                lock: tracker.lock(),
+                intent: tracker.intent(),
                 error: None,
             });
         }
@@ -122,14 +122,14 @@ pub fn feed_from(
 ) -> (Tracker, StampClock, Step) {
     match sensor.decode(&r.bytes) {
         Err(e) => {
-            let lock = tracker.lock();
+            let intent = tracker.intent();
             (
                 tracker,
                 clock,
                 Step {
                     at: r.at,
                     outs: vec![],
-                    lock,
+                    intent,
                     error: Some(e),
                 },
             )
@@ -146,14 +146,14 @@ pub fn feed_from(
                 clock = c;
                 outs.extend(o);
             }
-            let lock = tracker.lock();
+            let intent = tracker.intent();
             (
                 tracker,
                 clock,
                 Step {
                     at: r.at,
                     outs,
-                    lock,
+                    intent,
                     error: None,
                 },
             )

@@ -38,6 +38,17 @@ pub fn point(at: MmPoint) -> Point {
     Point::new(REFERENCE.x.units(at.x), REFERENCE.y.units(at.y))
 }
 
+/// `units` of the grid along `axis`, in millimetres.
+pub fn mm(units: i32, axis: Axis) -> Mm {
+    per_mm(axis).mm(units)
+}
+
+/// A length in millimetres on the grid along `axis`, rounded to the nearest unit. The inverse of
+/// [`mm`]: a whole number of units comes back exactly.
+pub fn grid(mm: Mm, axis: Axis) -> i32 {
+    per_mm(axis).units(mm)
+}
+
 /// A configured length on the grid along `axis`, rounded to the nearest unit.
 pub fn units(um: Um, axis: Axis) -> i32 {
     per_mm(axis).units(Mm(f64::from(um.0) / 1000.0))

@@ -1,4 +1,4 @@
-//! The acceleration curve: the gain that turns a sample's raw units into px.
+//! The acceleration curve: the gain that turns a sample's raw units into shell px.
 //!
 //! One function of finger speed, shaped after the published description of the reference
 //! desktop's scroll acceleration: slow motion is precise (gain exactly 1, the base ratio of
@@ -18,9 +18,10 @@
 //! 2's raw units). They shape the transfer function rather than recognise a gesture, and apply
 //! to whichever axis locked, so they stay in grid units rather than becoming x/y millimetres.
 
-use super::gain::VELOCITY_DT_MAX;
 use crate::config::{Count, Fraction};
 
+/// The acceleration applies only to samples at most this far apart.
+const VELOCITY_DT_MAX: f64 = 0.05;
 /// `v0`: below this speed the gain is 1.
 const PRECISE_BELOW: Count = Count(1500);
 /// `s`: the speed above `v0` that adds 1.0 to the gain.

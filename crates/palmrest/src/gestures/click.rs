@@ -3,10 +3,16 @@
 //! From the press until `click_guard_ms` after the release, no gesture starts, taps are void,
 //! and the running scroll is Cancelled at the press.
 
-use crate::feel::Hold;
 use crate::sensor::magic_mouse::report::Buttons;
 use crate::time::Mono;
 use std::time::Duration;
+
+/// Whether a physical click is holding gestures off (P4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hold {
+    Open,
+    Held,
+}
 
 /// The guard between reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

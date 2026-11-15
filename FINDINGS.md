@@ -39,34 +39,55 @@ kernel's own wheel emulation, off while palmrest scrolls. Settled 2026-09-30. Th
 daemon's repeat gain (2.3) and the classic velocity gain were retired with the `Classic` curve
 (2026-10-27); one acceleration curve (`feel/curve.rs`) replaced them.
 
-**The foreign outputs on KDE.** Foreign clients are scrolled through a new
-device, "palmrest touchpad"; Plasma has no saved natural-scrolling setting for it, so the
-direction may need setting once in System Settings. The touchpad path is unproven live (items 8, 9).
-
-**The virtual touchpad is small for 0.25 mm/px.** A pair landing at the centre of a
-100 x 70 mm pad has 30 mm (120 px of scroll) before the 5 mm edge margin vertically. palmrest
-then lifts and re-lands the pair at the centre, which a toolkit sees as one stroke ending and
-another starting (possibly a kinetic fling in between). Needs item 9 on the device: a larger
-virtual pad, a smaller mm/px, or landing opposite the motion.
+**The foreign outputs.** Foreign clients are scrolled through a new
+device, "palmrest touchpad"; a desktop may have no saved natural-scrolling setting for it, so the
+direction may need setting once in the system settings. libinput owns the scroll feel (its
+scaling, acceleration and momentum): the pad's fingers move as far as the real ones, times the
+`scroll.speed` multiplier (`feel/pad.rs`, 1.0 at the default speed). Items below are the device
+checks that remain.
 
 **P1 may eat real taps.** A quick tap can lift before its size reaches 8; with rejection
 such a touch never counts, so no tap. As specified; tune on the device.
 
-**Not built: live workspace mode.** A synthetic four-contact swipe on the virtual touchpad so
-the compositor tracks the workspace. Its model and keys are built together with the driver
-that uses them. On our desktop,
-`Workspace(step)` (the words `workspace_prev`, `workspace_next`, `workspace_overview`) and `ShellIpc(s)` are asked of the shell (`ToHost::Run`), which does
-what `sill workspace ...` and `sill` with the words of `s` do.
+**Closed (2026-11-15): live workspace mode and the small virtual pad.** A two-finger sideways
+stroke is the recogniser's `SpaceSwipe` (`gestures/stroke`), and while both two-finger rows of
+`[gestures.gesture_action_map]` are the workspace defaults (`workspace_next`, `workspace_prev`) the
+pad session puts four contacts 12 mm apart on the virtual touchpad that follow the fingers 1:1 in
+x; casement's four-finger touchpad swipe moves the Spaces live and commits or returns on the lift.
+palmrest decides nothing about the Space. Any other mapping keeps a one-shot action fired on
+7.7 mm of travel with a 500 ms cooldown. The scroll pad lands two contacts 20 mm apart on the side
+opposite the motion and moves 1:1, so a 45 mm stroke is one stroke (it re-lands only when truly out
+of room); the old 0.25 mm/px, 120 px re-landing and centre landing are gone. `ToHost::Swipe` is no
+longer sent. `Workspace(step)`, `ShellIpc(s)` and `Command` actions are asked of the shell
+(`ToHost::Run`) on every desktop.
+
+**Desktop detection removed (2026-11-15).** `daemon::Env` no longer reads
+`XDG_CURRENT_DESKTOP` and `action::Desktop` is gone: a system service never sees the person's
+desktop, and the KDE branch of `plan` (kwin `qdbus` shortcuts) went with it. `plan(action)` is the
+same on every desktop.
+
+**Device checks for the pad strokes (open).**
+- libinput's scroll ratio on the device: screen px per mm of finger for a slow and a fast stroke
+  (a real trackpad gives about 12 px/mm); `scroll.speed` is the only knob.
+- The four-finger swipe's page distance: how many mm of finger casement counts as one Space, and
+  whether the swipe's 12 mm spacing and 49 mm of room (centre 28 to 77 mm) are enough.
+- DWT: libinput's disable-while-typing is on for the virtual pad, which may swallow a scroll or a
+  swipe right after typing. casement-side; recorded for the shell brief.
+- `ToHost::Swipe` is no longer sent and the shell ignores it: delete the variant (and `Topic::Swipe`)
+  from `palmrest-protocol` in lockstep with shell-host.
+- The shell stream keeps the carried-remainder rounding of the old quantiser (`feel/shell.rs`
+  `Carry`) so its values are unchanged; it wobbles by under a few px per sample when the gain
+  changes and may be simplified to `raw / rate` if the shell does not care.
 
 **Settings that are constants (2026-10-27).** Only `scroll.speed` and the six
 `gestures.gesture_action_map.*` rows are settings; macOS offers a scrolling speed and a choice of
 what gestures do, and nothing else of palmrest's numbers is a choice a person makes. The
 numbers design/22 §3.9/§3.10 once listed as keys are constants beside the code that uses them:
-the axis lock (`feel/rule.rs`: 1538 / 571 um thresholds, ratio 1.5, 250 ms timeout, 60 px
-detent), the acceleration curve (`feel/curve.rs`: `v0` 1500, `s` 3000, `p` 1.6, `g_max` 6.0),
+the axis lock (`gestures/stroke/rule.rs`: 1538 / 571 um thresholds, ratio 1.5, 250 ms timeout),
+the shell's 60 px detent (`feel/shell.rs`), the acceleration curve (`feel/curve.rs`: `v0` 1500, `s` 3000, `p` 1.6, `g_max` 6.0),
 palm rejection (`gestures/bands.rs`, `gestures/contacts/rejection.rs`, `tracker/mod.rs`), the
 swipe, one-finger swipe and taps (`gestures/swipe.rs`, `one_swipe.rs`, `tap.rs`) and the
-virtual touchpad (`outputs/pad.rs`: 0.25 mm/px, 20 mm spacing, 200 ms minimum down). A file
+virtual touchpad (`outputs/pad/`: 20 mm and 12 mm spacing, the libinput zones, 200 ms minimum down). A file
 written with the removed keys still loads: an unknown key is ignored. Also hard-coded: the
 timestamp calibration constants (10 s fit window, 60 s refit, 1 ms residual) and the pad
 geometry (4000 x 2800 units at 40/mm). 22-SETTINGS §4.3 sketches a flat
@@ -130,7 +151,7 @@ Mouse 1's report 0x29); `touch.rs` (12-bit wrap of deltas, now on every sensor's
   shell line over 16 words or 256 bytes a word) with a warning, and forgets it when another person
   takes the seat. A bad value in the person's layer falls back to the key's shipped default, not to
   the machine's value (the merge happens before the lenient reading). The actions that need the
-  session (`Workspace`, `ShellIpc`, `Command`, and the KDE shortcuts) are a
+  session (`Workspace`, `ShellIpc`, `Command`) are a
   `ToHost::Run` to the shell's connection alone, whatever its filter; the shell runs them as the
   person (sill: the workspace verbs and shell lines through its own request path, a program as a
   child of the shell). With no shell connected the action is dropped and logged. Key actions still go

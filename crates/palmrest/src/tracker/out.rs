@@ -16,8 +16,8 @@ pub enum Out {
     Pad(PadFrame),
     /// A key combination on the virtual keyboard (O3).
     Key(KeyCombo),
-    /// What a gesture asks of the person's session, which the daemon plans for the desktop it
-    /// runs under (`action::plan`).
+    /// What a gesture asks of the person's session, which the daemon plans for the shell
+    /// (`action::plan`).
     Deferred(Action),
 }
 

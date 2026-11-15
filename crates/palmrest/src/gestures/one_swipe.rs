@@ -4,9 +4,10 @@
 //! horizontally by the time the finger lifts, and on our own surfaces the host makes the swipe
 //! decision itself (12.3.6), so this only ever adds a key for foreign clients.
 
+use super::stroke::Intent;
 use super::swipe::FingerDirection;
+use super::{Hold, Sample};
 use crate::config::{Fraction, Ms, Um};
-use crate::feel::{Hold, Lock, Sample};
 use crate::sensor::lattice::units;
 use crate::time::Mono;
 use crate::touch::{Point, TouchId};
@@ -42,11 +43,11 @@ pub enum OneSwipe {
 }
 
 impl OneSwipe {
-    /// Consumes one report's contacts and the scroll lock's decision after it.
+    /// Consumes one report's contacts and the recogniser's decision after it.
     pub fn step(
         self,
         contacts: &[Sample],
-        lock: Lock,
+        intent: Option<Intent>,
         now: Mono,
         hold: Hold,
     ) -> (Self, Option<FingerDirection>) {
@@ -63,23 +64,23 @@ impl OneSwipe {
                     last_motion: now,
                     locked_at: None,
                 })
-                .locked(lock, now),
+                .locked(intent, now),
                 None,
             ),
             (Self::Tracking(s), [c]) if s.id == c.id => {
-                (Self::Tracking(s.moved(c.at, now)).locked(lock, now), None)
+                (Self::Tracking(s.moved(c.at, now)).locked(intent, now), None)
             }
             _ => (Self::Void, None),
         }
     }
 
-    fn locked(self, lock: Lock, now: Mono) -> Self {
-        match (self, lock) {
-            (Self::Tracking(s), Lock::X) => Self::Tracking(Stroke {
+    fn locked(self, intent: Option<Intent>, now: Mono) -> Self {
+        match (self, intent) {
+            (Self::Tracking(s), Some(Intent::Scroll(Axis::X))) => Self::Tracking(Stroke {
                 locked_at: s.locked_at.or(Some(now)),
                 ..s
             }),
-            (Self::Tracking(_), Lock::Y | Lock::Blocked) => Self::Void,
+            (Self::Tracking(_), Some(Intent::Scroll(Axis::Y) | Intent::SpaceSwipe)) => Self::Void,
             (other, _) => other,
         }
     }
@@ -129,14 +130,7 @@ mod tests {
     fn stroke(dx: i32, dy: i32, n: u64, settle: u64) -> Option<FingerDirection> {
         let mut s = OneSwipe::Idle;
         for i in 0..n {
-            let lock = if i >= 2 {
-                Lock::X
-            } else {
-                Lock::Free {
-                    pend_x: 0,
-                    pend_y: 0,
-                }
-            };
+            let lock = (i >= 2).then_some(Intent::Scroll(Axis::X));
             let (next, fired) = s.step(
                 &at(dx * i as i32, dy * i as i32),
                 lock,
@@ -148,7 +142,7 @@ mod tests {
         }
         s.step(
             &[],
-            Lock::X,
+            Some(Intent::Scroll(Axis::X)),
             Mono::from_millis((n - 1) * 10 + settle),
             Hold::Open,
         )
@@ -191,11 +185,32 @@ mod tests {
                 at: Point::new(500, 0),
             },
         ];
-        let (s, _) = OneSwipe::Idle.step(&at(0, 0), Lock::X, Mono(0), Hold::Open);
-        let (s, _) = s.step(&two, Lock::X, Mono::from_millis(10), Hold::Open);
-        let (s, _) = s.step(&at(400, 0), Lock::X, Mono::from_millis(20), Hold::Open);
+        let (s, _) = OneSwipe::Idle.step(
+            &at(0, 0),
+            Some(Intent::Scroll(Axis::X)),
+            Mono(0),
+            Hold::Open,
+        );
+        let (s, _) = s.step(
+            &two,
+            Some(Intent::Scroll(Axis::X)),
+            Mono::from_millis(10),
+            Hold::Open,
+        );
+        let (s, _) = s.step(
+            &at(400, 0),
+            Some(Intent::Scroll(Axis::X)),
+            Mono::from_millis(20),
+            Hold::Open,
+        );
         assert_eq!(
-            s.step(&[], Lock::X, Mono::from_millis(30), Hold::Open).1,
+            s.step(
+                &[],
+                Some(Intent::Scroll(Axis::X)),
+                Mono::from_millis(30),
+                Hold::Open
+            )
+            .1,
             None
         );
     }

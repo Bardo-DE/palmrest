@@ -52,13 +52,13 @@ sensor's millimetres feel the same per millimetre.
 | `sensor::evdev` | `EvdevMultitouch`: `ABS_MT_*` slots and `SYN_REPORT` times (untested beyond the Magic Mouse) |
 | `touch` | the Magic Mouse's touch block, and the grid `Point` the core works in |
 | `stamp` | the 18-bit device timestamp fitted onto `CLOCK_MONOTONIC` (12.3.1, acceptance 12); evdev's kernel stamps |
-| `feel` | axis lock, the acceleration curve, px, natural direction (12.3.8) |
-| `gestures` | contacts and palm/rest rejection P1-P5, scroll phases, G4 one-finger swipe, G5 workspace swipe, G6/G7 double-taps |
+| `feel` | every transfer function, one per sink: `shell` (mm to px for the shell, with the acceleration curve) and `pad` (mm to pad distance, 1:1 times the speed multiplier) (12.3.8) |
+| `gestures` | contacts and palm/rest rejection P1-P5, `stroke` (the one recogniser: axis lock, scroll or Spaces-swipe intent, phases, motion in mm), G4 one-finger swipe, G5 the fired swipe for a remapped two-finger mapping, G6/G7 double-taps |
 | `tracker` | `Tracker::step(self, &Report, now) -> (Self, Vec<Out>)`: all of the above composed (12.4) |
-| `action`, `keys` | the gesture -> action table and what an action means on KDE |
+| `action`, `keys` | the gesture -> action table and what an action asks of the shell (the same on every desktop) |
 | `palmrest-protocol` (crate) | the socket messages and their codec (12.3.10) |
 | `config` | `gestures.toml`, lenient per key, the watch |
-| `outputs` | the `Emitter` seam, `RecordingEmitter`, the virtual touchpad model, evdev event encoding |
+| `outputs` | the `Emitter` seam, `RecordingEmitter`, the virtual touchpad session (`pad`: scroll pair and four-finger Spaces swipe), evdev event encoding |
 | `recording`, `replay` | the `palmrest record` file (v1 hidraw, v2 any sensor) and the replay used by every acceptance test |
 | `daemon` | threads, socket, discovery and backoff, the sensor node (hidraw), devices, record, latency, the virtual-device emitter over the input service (and the direct fallback), `sys`: the evdev and uinput ioctls through `input-linux`'s safe handles, and `hidioc`: the one hidraw ioctl, the only module allowed `unsafe` |
 
@@ -114,7 +114,9 @@ a shell line, a program); the daemon has no session of its own. While locked no 
 runs a key or a desktop action; scrolling and the stream to subscribers go on.
 
 Scroll px are in finger direction (+x right, +y toward the user) with the acceleration applied; the
-host applies natural scrolling. Every `MayBegin` is closed by exactly one `Ended` or
+host applies natural scrolling. `Swipe` is no longer sent: a two-finger sideways stroke reaches the
+compositor as a four-finger swipe on the virtual touchpad (or fires its action when the two-finger
+rows are remapped), and the shell sees it only as a `MayBegin` closed by `Ended` with no axis. Every `MayBegin` is closed by exactly one `Ended` or
 `Cancelled`.
 
 ## Safety rules
@@ -216,7 +218,8 @@ Waiting for the user and the device (FINDINGS has the core's list: items 8, 9, 1
 11 live, 12).
 
 - **Acceleration:** record real sessions (`palmrest record`) and scroll with the curve; tune the
-  constants in `feel/curve.rs` if slow scrolling is not precise or a flick runs away.
+  constants in `feel/curve.rs` if slow scrolling is not precise or a flick runs away (the shell's
+  feel only; apps scroll by libinput's).
 - **Suppression:** hovering a shell-host surface stops the touchpad's scroll.
 
 ## Tests

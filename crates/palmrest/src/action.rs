@@ -1,4 +1,4 @@
-//! The gesture -> action table (12.6) and what each action means on this desktop.
+//! The gesture -> action table (12.6) and what each action asks of the shell.
 //!
 //! Every gesture is remappable in `[gestures.gesture_action_map]`; the shipped defaults are the
 //! reference platform's. `plan` is pure: it says which key to press or which program to run,
@@ -238,6 +238,14 @@ impl ActionMap {
         self
     }
 
+    /// Whether both two-finger swipes are the workspace defaults. Then the swipe is live: the
+    /// pad carries the fingers to the compositor, which follows them and decides on the lift.
+    /// Any other mapping is a one-shot action that fires on travel (`SwipeFire`).
+    pub fn two_finger_swipe_is_live(&self) -> bool {
+        self.action_for(Gesture::TwoFingerSwipeLeft) == &Action::Workspace(Workspace::Next)
+            && self.action_for(Gesture::TwoFingerSwipeRight) == &Action::Workspace(Workspace::Prev)
+    }
+
     /// Every key combination the table can press: what the virtual keyboard registers.
     pub fn combos(&self) -> Vec<KeyCombo> {
         self.actions.iter().filter_map(key_of).collect()
@@ -265,46 +273,16 @@ impl Action {
     }
 }
 
-/// The desktop the daemon runs under, from `XDG_CURRENT_DESKTOP`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Desktop {
-    Kde,
-    /// Our desktop (`XDG_CURRENT_DESKTOP=quire`).
-    Quire,
-    Other,
-}
-
-impl Desktop {
-    /// Reads the colon-separated desktop list, matching whole names.
-    pub fn from_env_value(v: &str) -> Self {
-        let names: Vec<&str> = v.split(':').map(str::trim).collect();
-        if names.iter().any(|n| n.eq_ignore_ascii_case("KDE")) {
-            Self::Kde
-        } else if names.iter().any(|n| n.eq_ignore_ascii_case("quire")) {
-            Self::Quire
-        } else {
-            Self::Other
-        }
-    }
-}
-
-/// What `action` asks of the shell on `desktop`, if anything: the daemon is a system service, with
-/// no session of its own to run a program or a shell command in.
-pub fn plan(action: &Action, desktop: Desktop) -> Option<HostAction> {
-    match (action, desktop) {
-        (Action::Workspace(Workspace::Prev), Desktop::Kde) => {
-            Some(kwin("Switch One Desktop to the Left"))
-        }
-        (Action::Workspace(Workspace::Next), Desktop::Kde) => {
-            Some(kwin("Switch One Desktop to the Right"))
-        }
-        (Action::Workspace(Workspace::Overview), Desktop::Kde) => Some(kwin("Overview")),
-        (Action::Workspace(step), _) => Some(HostAction::Workspace(*step)),
-        (Action::ShellIpc(s), _) => bounded(HostAction::Shell {
+/// What `action` asks of the shell, if anything: the daemon is a system service, with no session
+/// of its own to run a program or a shell command in, so a workspace step, a shell line and a
+/// command all go to the shell, which knows its own desktop.
+pub fn plan(action: &Action) -> Option<HostAction> {
+    match action {
+        Action::Workspace(step) => Some(HostAction::Workspace(*step)),
+        Action::ShellIpc(s) => bounded(HostAction::Shell {
             words: s.split_whitespace().map(str::to_owned).collect(),
         }),
-        (Action::Command(argv), _) => bounded(HostAction::Command { argv: argv.clone() }),
+        Action::Command(argv) => bounded(HostAction::Command { argv: argv.clone() }),
         _ => None,
     }
 }
@@ -312,21 +290,6 @@ pub fn plan(action: &Action, desktop: Desktop) -> Option<HostAction> {
 /// `action` when its words fit what the shell is asked for.
 fn bounded(action: HostAction) -> Option<HostAction> {
     action.fits().then_some(action)
-}
-
-fn kwin(shortcut: &str) -> HostAction {
-    HostAction::Command {
-        argv: [
-            "qdbus-qt6",
-            "org.kde.kglobalaccel",
-            "/component/kwin",
-            "org.kde.kglobalaccel.Component.invokeShortcut",
-            shortcut,
-        ]
-        .iter()
-        .map(|s| (*s).to_owned())
-        .collect(),
-    }
 }
 
 #[cfg(test)]
@@ -422,61 +385,44 @@ mod tests {
     }
 
     #[test]
-    fn desktop_names_match_whole_tokens() {
-        const CASES: &[(&str, Desktop)] = &[
-            ("KDE", Desktop::Kde),
-            ("ubuntu:KDE", Desktop::Kde),
-            ("quire", Desktop::Quire),
-            ("quire:GNOME", Desktop::Quire),
-            ("KDEX", Desktop::Other),
-            ("GNOME", Desktop::Other),
-            ("", Desktop::Other),
-        ];
-        for &(v, want) in CASES {
-            assert_eq!(Desktop::from_env_value(v), want, "{v:?}");
-        }
-    }
-
-    #[test]
     fn plan_table() {
         let workspace = Action::Workspace;
-        let kde_left = plan(&workspace(Workspace::Prev), Desktop::Kde);
-        assert!(matches!(
-            &kde_left,
-            Some(HostAction::Command { argv })
-                if argv.last().map(String::as_str) == Some("Switch One Desktop to the Left")
-        ));
-        for desktop in [Desktop::Quire, Desktop::Other] {
-            for step in [Workspace::Prev, Workspace::Next, Workspace::Overview] {
-                assert_eq!(
-                    plan(&workspace(step), desktop),
-                    Some(HostAction::Workspace(step)),
-                    "{step:?} on {desktop:?}"
-                );
-            }
+        for step in [Workspace::Prev, Workspace::Next, Workspace::Overview] {
+            assert_eq!(
+                plan(&workspace(step)),
+                Some(HostAction::Workspace(step)),
+                "{step:?}"
+            );
         }
-        assert_eq!(plan(&Action::Command(vec![]), Desktop::Kde), None);
-        assert_eq!(plan(&Action::Back, Desktop::Kde), None);
+        assert_eq!(plan(&Action::Command(vec![])), None);
+        assert_eq!(plan(&Action::Back), None);
         assert_eq!(
-            plan(&Action::ShellIpc("dock toggle".into()), Desktop::Quire),
+            plan(&Action::ShellIpc("dock toggle".into())),
             Some(HostAction::Shell {
                 words: vec!["dock".into(), "toggle".into()]
             })
         );
         assert_eq!(
-            plan(
-                &Action::Command(vec!["notify-send".into(), "hi".into()]),
-                Desktop::Other
-            ),
+            plan(&Action::Command(vec!["notify-send".into(), "hi".into()])),
             Some(HostAction::Command {
                 argv: vec!["notify-send".into(), "hi".into()]
             })
         );
         assert_eq!(
-            plan(&Action::ShellIpc("w ".repeat(17)), Desktop::Other),
+            plan(&Action::ShellIpc("w ".repeat(17))),
             None,
             "a line over the bounds asks for nothing"
         );
+    }
+
+    #[test]
+    fn the_swipe_is_live_only_while_both_rows_are_the_workspace_defaults() {
+        let live = ActionMap::default();
+        assert!(live.two_finger_swipe_is_live());
+        let left = live.clone().with(Gesture::TwoFingerSwipeLeft, Action::Back);
+        let right = live.with(Gesture::TwoFingerSwipeRight, Action::None);
+        assert!(!left.two_finger_swipe_is_live());
+        assert!(!right.two_finger_swipe_is_live());
     }
 
     #[test]

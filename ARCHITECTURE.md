@@ -47,7 +47,7 @@ daemon, `sys` and the CLI verbs are `pub(crate)`; the one public entry to them i
 | L0 vocabulary | `time` (`Mono`), `keys` (`Key`, `KeyCombo`), `config/units`, `sensor/units` | newtypes | `pub` |
 | L1 sensors | `sensor` (`Sensor`, `Frame`, `Surface`, `lattice`), `sensor/magic_mouse` (`MagicMouseHid`, `decode`, `encode`, `report`, `known`), `sensor/evdev` (`EvdevMultitouch`), `touch`, `stamp` | bytes to millimetre frames | `pub` |
 | L2 settings | `config` (`Config`, sections, `lenient`, `load`, `watch`) | pure except `load` and `watch` (file reads, inotify) | `pub` |
-| L3 feel and gestures | `feel`, `gestures` (`contacts`, `bands`, `click`, `motion`, `scroll`, `swipe`, `one_swipe`, `tap`) | pure | `pub` |
+| L3 feel and gestures | `feel` (`shell`, `pad`, `curve`), `gestures` (`contacts`, `bands`, `click`, `motion`, `stroke`, `swipe`, `one_swipe`, `tap`) | pure | `pub` |
 | L4 tracker and actions | `tracker` (`Tracker::step`, `Out`), `action` (`Gesture`, `Action`, `plan`) | pure composition: `Tracker::step(self, &Frame, now) -> (Self, Vec<Out>)` | `pub` |
 | L5 outputs model | `outputs` (`Emitter`, `RecordingEmitter`, `pad`, `events`) | the seam and the models of what is written | `pub` |
 | L6 tools | `recording`, `replay` (`replay`, `feed`, `outs`) | pure: feed recorded reads through the core | `pub` |
@@ -89,14 +89,14 @@ decision vs lock parameters, contact tracking vs palm turn, one file per scenari
 | evdev multitouch slots | `sensor::evdev` |
 | Touch block and grid `Point` | `touch` |
 | Palm and rest rejection, contact tracking | `gestures::contacts` |
-| Scroll phases | `gestures::scroll` |
-| One-finger swipe, two-finger swipe, double-taps | `gestures::{one_swipe, swipe, tap}` |
-| Axis lock, the acceleration curve, px | `feel::*` |
-| Natural direction | `feel::natural` |
+| Reading the contacts as a stroke: the contact set, the one centroid delta, the axis lock, scroll or Spaces-swipe intent, the phases and the motion in mm | `gestures::stroke` (`Recogniser::step`) |
+| One-finger swipe, the fired two-finger swipe (remapped only), double-taps | `gestures::{one_swipe, swipe, tap}` |
+| Every transfer function from mm to an output, one per sink | `feel::shell` (px for the shell, with `feel::curve`), `feel::pad` (pad distance) |
 | Gesture state of the daemon | `tracker::Tracker` |
-| The virtual touchpad's scroll for foreign clients | `tracker::foreign`, `outputs::pad` |
+| What each sink makes of a stroke event | `tracker::strokes` |
+| The virtual touchpad session: landing, following, lifting, the libinput zones | `outputs::pad` (`layout` for the geometry) |
 | What the tracker asks for | `tracker::Out` |
-| Gesture to action table, per-desktop meaning | `action`, `keys` |
+| Gesture to action table, what an action asks of the shell | `action`, `keys` |
 | Socket messages | `palmrest-protocol` |
 | The settings a person chooses (scroll speed, the gesture table), default, range | `config::sections` |
 | Every other tuning number | a named constant beside the code that uses it |
@@ -261,13 +261,16 @@ node for writing, or reads a real config directory or a running daemon.
   cargo deny check licenses
   ```
 
-## 8. The live model is deleted
+## 8. The live Spaces swipe
 
-`gestures::live` (progress, dampened overshoot, release velocity, commit or cancel, finish
-duration) and its keys have no driver: nothing in the daemon, the tests outside `live.rs`, or
-shell-host calls them (the host has no consumer of `Swipe` yet, and would own its own
-page-swipe formulas). A live workspace mode, when built, adds its model and keys with its driver.
-The FINDINGS entry "Not built: live workspace mode" stays as the open item.
+palmrest does not model the swipe's progress, overshoot or commit: casement does, on any
+touchpad. A two-finger sideways stroke (the recogniser's `SpaceSwipe`) lands four contacts on the
+virtual touchpad that follow the fingers' x 1:1 and lift when the fingers do; casement decides to
+commit or return on the lift. It is live while both two-finger rows of
+`[gestures.gesture_action_map]` are the workspace defaults. Any other mapping fires its action once
+per 7.7 mm of travel (500 ms cooldown) from the same intent (`gestures::swipe`). The swipe runs
+whoever holds the pointer, and not while the session is locked. `ToHost::Swipe` is not sent; its
+variant stays in the protocol until shell-host drops it in lockstep.
 
 ## 9. Migration order
 

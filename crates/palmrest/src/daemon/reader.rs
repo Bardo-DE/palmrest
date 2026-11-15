@@ -7,7 +7,6 @@ use super::dispatch::dispatch;
 use super::hidraw;
 use super::socket::{FromSocket, SocketHandle, ToSocket};
 use super::source::{self, Opened, Purpose};
-use crate::action::Desktop;
 use crate::config::{self, Loaded};
 use crate::recording::Record;
 use crate::replay::{Timing, feed_from};
@@ -28,7 +27,6 @@ pub struct Reader {
     pub notes: Receiver<FromSocket>,
     pub configs: Receiver<Loaded>,
     pub devices: Devices,
-    pub desktop: Desktop,
     pub tracker: Tracker,
     /// The machine's settings text (`/etc/palmrest/gestures.toml`), as last read.
     pub system: String,
@@ -151,7 +149,7 @@ impl Reader {
     }
 
     fn emit(mut self, outs: Vec<Out>) -> Self {
-        let lost = dispatch(outs, &self.socket, &mut self.devices, self.desktop);
+        let lost = dispatch(outs, &self.socket, &mut self.devices);
         if lost {
             Self {
                 tracker: self.tracker.devices_lost(),

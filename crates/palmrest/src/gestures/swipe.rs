@@ -1,22 +1,22 @@
-//! G5: two-finger horizontal travel switches workspaces, as a value.
+//! G5 for a remapped two-finger swipe: sideways travel of the recogniser's `SpaceSwipe` fires
+//! the mapped action once per threshold.
 //!
-//! Travel is the pair's centroid from where it landed, on the grid. Vertical travel that
-//! dominates past `VERTICAL_MAX` re-anchors (the pair is scrolling; "dominates" compares grid
-//! units, as it always did); `THRESHOLD` of horizontal travel fires once
-//! in the direction the fingers moved and re-anchors, so a long drag keeps going after the
-//! cooldown. The same pair also feeds the host a raw `Swipe` stream.
+//! When both two-finger swipes are the workspace defaults the swipe is live on the virtual
+//! touchpad and nothing here runs. When the person mapped them to something else (keys, a
+//! command, a shell line) this fires it. Travel counts from the start of the stroke, including
+//! the motion that accumulated before the recogniser decided; `THRESHOLD` of it fires once in
+//! the direction the fingers moved and starts the count again, so a long drag keeps going after
+//! the cooldown.
 
+use super::stroke::{Event, Intent};
 use crate::config::{Ms, Um};
-use crate::feel::{Hold, Sample};
-use crate::sensor::lattice::units;
+use crate::sensor::lattice::{grid, units};
+use crate::sensor::units::Mm;
 use crate::time::Mono;
-use crate::touch::TouchId;
-use palmrest_protocol::{Axis, GestureId, Phase};
+use palmrest_protocol::{Axis, Phase};
 
 /// Horizontal travel that fires.
 const THRESHOLD: Um = Um(7692);
-/// Vertical travel past which a pair counts as scrolling.
-const VERTICAL_MAX: Um = Um(2143);
 /// The next swipe counts only this long after the last fired.
 const COOLDOWN: Ms = Ms(500);
 
@@ -27,158 +27,54 @@ pub enum FingerDirection {
     Right,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-struct Pair {
-    ids: [TouchId; 2],
-    last: [Sample; 2],
-    travel_x: i32,
-    travel_y: i32,
-    gesture: GestureId,
-}
-
-/// The swipe between reports.
-#[derive(Debug, Clone, PartialEq)]
-pub struct SwipeG {
-    pair: Option<Pair>,
+/// The discrete swipe between reports.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct SwipeFire {
+    /// Sideways travel since the start of the stroke or the last threshold, in millimetres.
+    travel: f64,
     last_fire: Option<Mono>,
-    next_id: u32,
 }
 
-impl Default for SwipeG {
-    fn default() -> Self {
-        Self {
-            pair: None,
-            last_fire: None,
-            next_id: 1,
-        }
-    }
-}
-
-/// What one report produced.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum SwipeEvent {
-    /// For the host: the pair's phase and this report's centroid dx in grid units.
-    Stream {
-        gesture: GestureId,
-        phase: Phase,
-        dx_units: f32,
-    },
-    /// The swipe fired.
-    Fire(FingerDirection),
-}
-
-impl SwipeG {
-    /// Consumes one report's contacts.
-    pub fn step(self, contacts: &[Sample], now: Mono, hold: Hold) -> (Self, Vec<SwipeEvent>) {
-        let [a, b] = contacts else { return self.end() };
-        let mut ids = [a.id, b.id];
-        ids.sort();
-        match self.pair.clone() {
-            Some(p) if p.ids == ids && a.id != b.id => self.advance(p, [*a, *b], now, hold),
-            _ => {
-                let (s, mut ev) = self.end();
-                let gesture = GestureId(s.next_id);
-                ev.push(SwipeEvent::Stream {
-                    gesture,
-                    phase: Phase::Began,
-                    dx_units: 0.0,
-                });
-                let pair = Pair {
-                    ids,
-                    last: [*a, *b],
-                    travel_x: 0,
-                    travel_y: 0,
-                    gesture,
-                };
-                (
-                    Self {
-                        pair: Some(pair),
-                        next_id: s.next_id + 1,
-                        ..s
-                    },
-                    ev,
-                )
+impl SwipeFire {
+    /// Consumes one phase of a stroke; returns the direction when the swipe fires.
+    pub fn step(self, e: &Event, now: Mono) -> (Self, Option<FingerDirection>) {
+        match (e.phase, e.intent) {
+            (Phase::Began, Some(Intent::SpaceSwipe)) => self.travelled(e.motion.x, 0.0, now),
+            (Phase::Changed, Some(Intent::SpaceSwipe)) => {
+                self.travelled(e.motion.x, self.travel, now)
             }
+            (Phase::Ended | Phase::Cancelled, _) => (
+                Self {
+                    travel: 0.0,
+                    ..self
+                },
+                None,
+            ),
+            _ => (self, None),
         }
     }
 
-    fn end(self) -> (Self, Vec<SwipeEvent>) {
-        let ev = self
-            .pair
-            .as_ref()
-            .map(|p| SwipeEvent::Stream {
-                gesture: p.gesture,
-                phase: Phase::Ended,
-                dx_units: 0.0,
-            })
-            .into_iter()
-            .collect();
-        (Self { pair: None, ..self }, ev)
-    }
-
-    fn advance(
-        self,
-        p: Pair,
-        now_at: [Sample; 2],
-        now: Mono,
-        hold: Hold,
-    ) -> (Self, Vec<SwipeEvent>) {
-        let (sx, sy) = now_at.iter().fold((0, 0), |(sx, sy), c| {
-            let prev = p.last.iter().find(|s| s.id == c.id).map_or(c.at, |s| s.at);
-            let d = c.at.delta_from(prev);
-            (sx + d.x, sy + d.y)
-        });
-        let (dx, dy) = (sx / 2, sy / 2);
-        let mut ev = Vec::new();
-        if dx != 0 {
-            ev.push(SwipeEvent::Stream {
-                gesture: p.gesture,
-                phase: Phase::Changed,
-                dx_units: dx as f32,
-            });
+    /// `by` more travel on top of `from`: fires when the threshold is passed.
+    fn travelled(self, by: Mm, from: f64, now: Mono) -> (Self, Option<FingerDirection>) {
+        let travel = from + by.0;
+        let reached = grid(Mm(travel), Axis::X).abs() >= units(THRESHOLD, Axis::X).max(1);
+        if !reached {
+            return (Self { travel, ..self }, None);
         }
-        let p = Pair {
-            last: now_at,
-            travel_x: p.travel_x + dx,
-            travel_y: p.travel_y + dy,
-            ..p
-        };
-        let vertical_max = units(VERTICAL_MAX, Axis::Y);
-        let threshold = units(THRESHOLD, Axis::X);
-        let anchor = |p: Pair| Pair {
-            travel_x: 0,
-            travel_y: 0,
-            ..p
-        };
-        let (p, last_fire) = if hold == Hold::Held
-            || (p.travel_y.abs() > vertical_max && p.travel_y.abs() > p.travel_x.abs())
-        {
-            (anchor(p), self.last_fire)
-        } else if p.travel_x.abs() < threshold.max(1) {
-            (p, self.last_fire)
+        let cooled = self
+            .last_fire
+            .is_none_or(|t| now.since(t) >= COOLDOWN.duration());
+        let dir = if travel > 0.0 {
+            FingerDirection::Right
         } else {
-            let dir = if p.travel_x > 0 {
-                FingerDirection::Right
-            } else {
-                FingerDirection::Left
-            };
-            let cooled = self
-                .last_fire
-                .is_none_or(|t| now.since(t) >= COOLDOWN.duration());
-            if cooled {
-                ev.push(SwipeEvent::Fire(dir));
-                (anchor(p), Some(now))
-            } else {
-                (anchor(p), self.last_fire)
-            }
+            FingerDirection::Left
         };
         (
             Self {
-                pair: Some(p),
-                last_fire,
-                ..self
+                travel: 0.0,
+                last_fire: if cooled { Some(now) } else { self.last_fire },
             },
-            ev,
+            cooled.then_some(dir),
         )
     }
 }
