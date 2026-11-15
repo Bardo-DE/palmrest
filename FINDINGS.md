@@ -66,14 +66,22 @@ longer sent. `Workspace(step)`, `ShellIpc(s)` and `Command` actions are asked of
 desktop, and the KDE branch of `plan` (kwin `qdbus` shortcuts) went with it. `plan(action)` is the
 same on every desktop.
 
+**Measured on the device (2026-11-15).** Scroll at 1:1 felt right. libinput starts a
+four-finger swipe from the 12 mm row (a short hold first when the fingers barely move), and the
+updates come every 11 ms. The swipe felt uneven: the Magic Mouse reports a step about twice its
+neighbours' every four to six reports during fast motion, on both fingers at once, at an
+unchanged device time of 11 ms (not a lost packet). 80 such steps in 36 recorded swipes. The pad
+session now writes a swipe's row at the mean of its two latest positions and catches up before
+the lift (`outputs/pad`, `shown_after`): on the recording, step unevenness (mean change of step
+over mean step) fell from 0.37 to 0.29 for about 5 ms of lag, with the travel unchanged. The rest
+is casement's: it drives the Spaces with libinput's accelerated swipe delta, which enlarges what
+is left (an unaccelerated 37.6 became 57.9); the shell brief asks for the unaccelerated delta.
+
 **Device checks for the pad strokes (open).**
-- libinput's scroll ratio on the device: screen px per mm of finger for a slow and a fast stroke
+- libinput's scroll ratio in numbers: screen px per mm of finger for a slow and a fast stroke
   (a real trackpad gives about 12 px/mm); `scroll.speed` is the only knob.
 - The four-finger swipe's page distance: how many mm of finger casement counts as one Space, and
   whether the swipe's 12 mm spacing and 49 mm of room (centre 28 to 77 mm) are enough.
-- Whether libinput starts a four-finger swipe from four contacts 12 mm apart on the 100 x 70 mm
-  pad (its gesture start rules want the fingers close together and moving; the spacing is a guess
-  from the geometry, not a measurement).
 - The flick's velocity: a swipe now lifts at the report that ends it, with no 200 ms hold, so a
   flick should keep the speed it had; check that casement's commit sees it (a held lift added
   stationary time before).

@@ -105,25 +105,53 @@ fn a_scroll_out_of_room_lands_again_on_the_opposite_side() {
 
 #[test]
 fn a_swipe_follows_x_only_and_stops_at_the_edge() {
+    let row = |x_mm: f64| PadFrame::Move {
+        at: PadPoint {
+            x: (x_mm * 40.0) as i32,
+            y: 35 * 40,
+        },
+    };
     let (pad, _) = Pad::Up.land(SWIPE, lead(1.0, 0.0), Mono(0));
     let (pad, frames) = pad.moved(SWIPE, lead(10.0, 7.0), Mono::from_millis(50));
-    let at = PadPoint {
-        x: (28.0 + 10.0) as i32 * 40,
-        y: 35 * 40,
-    };
-    assert_eq!(frames, [PadFrame::Move { at }], "x moved, y did not");
+    assert_eq!(
+        frames,
+        [row(33.0)],
+        "x moved (halfway, smoothed), y did not"
+    );
     let (pad, frames) = pad.moved(SWIPE, lead(500.0, 0.0), Mono::from_millis(60));
     assert_eq!(
         frames,
-        [PadFrame::Move {
-            at: PadPoint {
-                x: 77 * 40,
-                y: 35 * 40
-            }
-        }],
-        "the outer contact stops 5 mm from the edge and nothing lands again"
+        [row(57.5)],
+        "the fingers stop 5 mm from the edge (77 mm) and nothing lands again"
     );
     assert!(matches!(pad, Pad::Down(_)));
+    let (_, frames) = pad.end(Mono::from_millis(70));
+    assert_eq!(
+        frames,
+        [row(77.0), PadFrame::Lift],
+        "the row catches up with the fingers before it lifts"
+    );
+}
+
+#[test]
+fn a_swipe_halves_a_lone_double_step_and_keeps_its_whole_travel() {
+    // The Magic Mouse's steady 2 mm steps with one 4 mm step among them.
+    let steps = [2.0, 2.0, 4.0, 2.0, 2.0];
+    let (pad, _) = Pad::Up.land(SWIPE, lead(1.0, 0.0), Mono(0));
+    let (pad, xs) = steps.iter().fold((pad, vec![28.0]), |(pad, mut xs), &dx| {
+        let (pad, frames) = pad.moved(SWIPE, lead(dx, 0.0), Mono::from_millis(10));
+        xs.push(contact_x(&frames[0]));
+        (pad, xs)
+    });
+    let shown: Vec<f64> = xs.windows(2).map(|w| w[1] - w[0]).collect();
+    let biggest = shown.iter().copied().fold(0.0, f64::max);
+    assert!(biggest <= 3.0, "the 4 mm step is spread out: {shown:?}");
+    let (_, frames) = pad.end(Mono::from_millis(70));
+    assert_eq!(
+        contact_x(&frames[0]),
+        28.0 + 12.0,
+        "the whole 12 mm arrives"
+    );
 }
 
 #[test]
@@ -249,4 +277,12 @@ fn only_the_intent_that_is_down_moves() {
         Pad::Up.moved(DOWN, lead(0.0, 1.0), Mono(1)),
         (Pad::Up, vec![])
     );
+}
+
+/// The row's centre x in millimetres, from a Move frame.
+fn contact_x(frame: &PadFrame) -> f64 {
+    match frame {
+        PadFrame::Move { at } => f64::from(at.x) / 40.0,
+        other => panic!("not a move: {other:?}"),
+    }
 }

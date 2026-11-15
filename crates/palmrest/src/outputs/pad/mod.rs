@@ -23,7 +23,7 @@ pub use policy::Policy;
 
 use crate::config::Ms;
 use crate::gestures::{Intent, Motion};
-use crate::sensor::units::MmPoint;
+use crate::sensor::units::{Mm, MmPoint};
 use crate::time::Mono;
 use serde::{Deserialize, Serialize};
 
@@ -71,7 +71,11 @@ pub struct Down {
     intent: Intent,
     landed: Mono,
     origin: MmPoint,
+    /// Where the fingers have taken the contacts.
     at: MmPoint,
+    /// Where the contacts were last written: `at`, or for a swipe the mean of `at` and the
+    /// position before it (`shown_after`).
+    shown: MmPoint,
 }
 
 /// The pad between frames.
@@ -105,6 +109,7 @@ impl Pad {
                 landed: now,
                 origin: at,
                 at,
+                shown: at,
             }),
             lifted.into_iter().chain([land]).collect(),
         )
@@ -117,10 +122,13 @@ impl Pad {
         match self {
             Pad::Down(down) if down.intent == intent => {
                 match layout::advance(intent, down.at, by) {
-                    layout::Next::Within(at) => (
-                        Pad::Down(Down { at, ..down }),
-                        vec![PadFrame::Move { at: point(at) }],
-                    ),
+                    layout::Next::Within(at) => {
+                        let shown = shown_after(intent, down.at, at);
+                        (
+                            Pad::Down(Down { at, shown, ..down }),
+                            vec![PadFrame::Move { at: point(shown) }],
+                        )
+                    }
                     layout::Next::OutOfRoom => self.land(intent, by, now),
                 }
             }
@@ -142,7 +150,16 @@ impl Pad {
                         },
                         vec![],
                     ),
-                    _ => (Pad::Up, vec![PadFrame::Lift]),
+                    // A swipe's row catches up with the fingers before it lifts, so the
+                    // compositor reads the whole travel and the last report's speed.
+                    _ => {
+                        let catch_up =
+                            (down.shown != down.at).then(|| PadFrame::Move { at: point(down.at) });
+                        (
+                            Pad::Up,
+                            catch_up.into_iter().chain([PadFrame::Lift]).collect(),
+                        )
+                    }
                 }
             }
             other => (other, vec![]),
@@ -194,10 +211,10 @@ impl Pad {
             Pad::Down(Down {
                 intent: Intent::SpaceSwipe,
                 origin,
-                at,
+                shown,
                 ..
             }) => {
-                let back = (at != origin).then(|| PadFrame::Move { at: point(origin) });
+                let back = (shown != origin).then(|| PadFrame::Move { at: point(origin) });
                 (Pad::Up, back.into_iter().chain([PadFrame::Lift]).collect())
             }
             other => other.lift_now(),
@@ -231,6 +248,22 @@ fn point(at: MmPoint) -> PadPoint {
     PadPoint {
         x: units(at.x.0),
         y: units(at.y.0),
+    }
+}
+
+/// Where a stroke's contacts are written when the fingers moved from `before` to `after`. The
+/// Magic Mouse reports a step about twice the size of its neighbours every few reports at a
+/// steady rate (measured 2026-11-15: both fingers at once, device time unchanged), which the
+/// Space strip shows as a stutter; a swipe writes the mean of the two latest positions, which
+/// halves such a step for half a report of lag. A scroll goes through unchanged: it felt right on
+/// the device without it.
+fn shown_after(intent: Intent, before: MmPoint, after: MmPoint) -> MmPoint {
+    match intent {
+        Intent::SpaceSwipe => MmPoint {
+            x: Mm((before.x.0 + after.x.0) / 2.0),
+            y: Mm((before.y.0 + after.y.0) / 2.0),
+        },
+        Intent::Scroll(_) => after,
     }
 }
 
