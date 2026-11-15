@@ -1,8 +1,15 @@
-//! The devices against recording emitters and the fake input service.
+//! The devices against recording emitters and the fake input service: the shell's wiring. The
+//! lifecycle's decisions are tested as pure steps in `lifecycle`.
 
-use super::*;
+mod lifecycle;
+
+use super::{Devices, Factory};
+use crate::config::Config;
 use crate::daemon::uinput::UinputEmitter;
-use crate::outputs::RecordingEmitter;
+use crate::keys::KeyCombo;
+use crate::outputs::pad::PadFrame;
+use crate::outputs::{Emitter, OutputError, RecordingEmitter};
+use crate::time::Mono;
 use std::cell::Cell;
 use std::rc::Rc;
 use turnstile_client::Reason;
@@ -65,7 +72,7 @@ impl Emitter for Destroyed {
 }
 
 #[test]
-fn a_failed_write_rebuilds_the_devices_and_reports_the_loss_once() {
+fn a_failed_write_rebuilds_the_devices_and_is_reported_once() {
     let built = Rc::new(Cell::new(0));
     let b = built.clone();
     let factory: Factory = Box::new(move |_| {
@@ -78,11 +85,8 @@ fn a_failed_write_rebuilds_the_devices_and_reports_the_loss_once() {
     });
     let mut d = Devices::new(factory, &Config::default(), Mono(0));
     assert_eq!(built.get(), 1);
-    assert!(!d.take_lost());
 
     assert!(d.pad(&land()).is_err(), "the failure is returned once");
-    assert!(d.take_lost());
-    assert!(!d.take_lost(), "asking resets it");
     assert!(
         d.pad(&land()).is_ok(),
         "frames while rebuilding are dropped without another error"
@@ -93,8 +97,8 @@ fn a_failed_write_rebuilds_the_devices_and_reports_the_loss_once() {
     let mut d = d.poll(Mono::from_millis(1010));
     assert_eq!(built.get(), 2, "rebuilt once the delay has passed");
     assert!(d.pad(&land()).is_ok());
-    assert!(!d.take_lost());
 }
+
 /// Devices whose emitter talks to `source`, as the daemon's do to the real service.
 fn service_devices(source: &FakeSource, c: &Config) -> Devices {
     let source = source.clone();
@@ -118,7 +122,6 @@ fn a_closed_connection_is_rebuilt_after_the_pause() {
 
     source.state().send_mode = SendMode::Close;
     assert!(d.pad(&land()).is_err());
-    assert!(d.take_lost());
 
     source.state().send_mode = SendMode::Accept;
     let d = d.poll(Mono::from_millis(10));
@@ -135,7 +138,6 @@ fn frames_the_service_drops_cost_no_rebuild() {
     let mut d = service_devices(&source, &Config::default());
     source.state().send_mode = SendMode::Drop;
     assert!(d.pad(&land()).is_ok());
-    assert!(!d.take_lost());
     assert_eq!(source.state().opened, 1);
 }
 

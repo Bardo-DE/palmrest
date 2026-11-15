@@ -151,8 +151,8 @@ impl Reader {
     }
 
     fn emit(mut self, outs: Vec<Out>) -> Self {
-        dispatch(outs, &self.socket, &mut self.devices, self.desktop);
-        if self.devices.take_lost() {
+        let lost = dispatch(outs, &self.socket, &mut self.devices, self.desktop);
+        if lost {
             Self {
                 tracker: self.tracker.devices_lost(),
                 ..self
