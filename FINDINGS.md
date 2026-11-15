@@ -5,7 +5,7 @@ Open items and standing facts. Design references are to quire's `design/NN` docu
 
 ## Open items
 
-**Type rules changed (2026-10-28).** CONVENTIONS now follows the plain-Rust-first rule: `bool` is fine in private code, newtypes only hold a rule, one fact has one type, two-way outcomes are `Option`/`Result`. Two-arm enums and mirror enums in palmrest were folded into `bool`, `Option` and their owner types.
+**Type rules changed (2026-10-28).** The type rules now follow plain Rust first: `bool` is fine in private code, newtypes only hold a rule, one fact has one type, two-way outcomes are `Option`/`Result`. Two-arm enums and mirror enums in palmrest were folded into `bool`, `Option` and their owner types.
 
 **Palm rejection P1 and P3 calibrated on the device (2026-09-30).** The guessed defaults
 (light below size 8, palm at major 64 or more) rejected every touch on the first real install,

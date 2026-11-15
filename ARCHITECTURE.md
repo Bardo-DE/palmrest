@@ -4,7 +4,7 @@ palmrest is the Magic Mouse 2 gesture daemon: it reads touch reports, turns them
 gesture streams, and delivers them over a socket to shell-host surfaces and, through virtual
 input devices, to every other client. `README.md` has the data flow, the socket protocol and
 the safety rules; quire's `design/12-BEHAVIOUR-gestures.md` is the specification;
-`CONVENTIONS.md` holds the rules every repo shares; `FINDINGS.md` the open items and standing
+`CONVENTIONS.md` names the style guides every repo follows; `FINDINGS.md` the open items and standing
 facts. This file is the map: where each thing lives, what may depend on what, and how to add
 the next thing. palmrest depends on no shell crate and runs on any Linux.
 
