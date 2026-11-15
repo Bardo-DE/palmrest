@@ -7,27 +7,37 @@
 //! decides whom to serve: only the person at the seat (`seat`), and of their programs only the
 //! shell (`shell`) is believed about the pointer and an unlocked session.
 //!
+//! The decisions are pure: `model` holds the subscribers and the events and effects, `step` (with
+//! `admit`, `packet`, `deliver` and `publish`) is the one transition, and `io` is the thread that
+//! polls, gathers the facts that need a syscall, feeds the events and carries out the effects.
+//!
 //! The reader thread hands messages over a bounded channel and wakes this thread with an
 //! eventfd, so the reader never blocks on a slow subscriber: a subscriber whose queue is full
 //! misses that message rather than delaying everyone else's scroll, and a full channel drops
 //! the message rather than stalling the reader. Subscribers are known by id, never by their
 //! position in the list, and their number is capped.
 
-mod client;
+mod admit;
+mod aggregate;
+mod conn;
+mod deliver;
+mod io;
 mod limits;
+mod model;
+mod packet;
+mod publish;
 mod seat;
-mod server;
 mod shell;
+mod step;
 
+use io::{Exit, Server};
 pub use latchkey::guard::{SEAT_FILE, SeatFile};
 use limits::QUEUE_MAX;
 use palmrest_protocol::{DeviceInfo, HostAction, LockState, Over, ToHost};
 use rustix::event::{EventfdFlags, eventfd};
 use rustix::fd::OwnedFd;
 use rustix::net::{AddressFamily, SocketAddrUnix, SocketFlags, SocketType};
-use server::{Exit, Server};
 pub use shell::Steering;
-use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -80,36 +90,6 @@ impl SocketHandle {
     }
 }
 
-/// The pointer is ours if any subscriber says so.
-pub fn aggregate(overs: impl IntoIterator<Item = Over>) -> Over {
-    if overs.into_iter().any(|o| o == Over::Ours) {
-        Over::Ours
-    } else {
-        Over::NotOurs
-    }
-}
-
-/// Whether the session counts as locked, from what each subscriber last said (`None`: nothing
-/// yet). Locked is the safe answer, so it wins whenever it is in doubt: any subscriber says
-/// locked, or nobody has said unlocked (no subscriber is connected, or the ones connected have
-/// said nothing). A lock screen the shell has not reported must never let a gesture run a key or
-/// a desktop command. Only a subscriber saying unlocked, with none saying locked, opens it.
-pub fn aggregate_lock(locks: impl IntoIterator<Item = Option<LockState>>) -> LockState {
-    let (mut unlocked, mut locked) = (false, false);
-    for said in locks {
-        match said {
-            Some(LockState::Unlocked) => unlocked = true,
-            Some(LockState::Locked) => locked = true,
-            None => {}
-        }
-    }
-    if unlocked && !locked {
-        LockState::Unlocked
-    } else {
-        LockState::Locked
-    }
-}
-
 /// `<runtime_dir>/events.sock`; the runtime directory is `/run/palmrest`, the unit's own.
 pub fn default_path(runtime_dir: &Path) -> PathBuf {
     runtime_dir.join("events.sock")
@@ -119,12 +99,12 @@ pub fn default_path(runtime_dir: &Path) -> PathBuf {
 /// connect, and the server serves only the person at the seat (the seat and shell checks, not the
 /// file mode, decide whom palmrest believes). The directory is the unit's `RuntimeDirectory=`
 /// (0755); made here only when it is missing, as in a development run.
-pub fn bind(path: &Path) -> io::Result<OwnedFd> {
+pub fn bind(path: &Path) -> std::io::Result<OwnedFd> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
     match std::fs::remove_file(path) {
-        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
         _ => {}
     }
     let fd = rustix::net::socket_with(
@@ -147,7 +127,7 @@ pub fn spawn(
     notes: Sender<FromSocket>,
     seat: SeatFile,
     steering: Steering,
-) -> io::Result<SocketHandle> {
+) -> std::io::Result<SocketHandle> {
     let wake = Arc::new(eventfd(0, EventfdFlags::CLOEXEC | EventfdFlags::NONBLOCK)?);
     let (tx, rx) = mpsc::sync_channel(QUEUE_MAX);
     let server = Server::new(listener, wake.clone(), rx, notes, seat, steering.vouch());
