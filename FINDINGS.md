@@ -71,23 +71,29 @@ same on every desktop.
   (a real trackpad gives about 12 px/mm); `scroll.speed` is the only knob.
 - The four-finger swipe's page distance: how many mm of finger casement counts as one Space, and
   whether the swipe's 12 mm spacing and 49 mm of room (centre 28 to 77 mm) are enough.
+- Whether libinput starts a four-finger swipe from four contacts 12 mm apart on the 100 x 70 mm
+  pad (its gesture start rules want the fingers close together and moving; the spacing is a guess
+  from the geometry, not a measurement).
+- The flick's velocity: a swipe now lifts at the report that ends it, with no 200 ms hold, so a
+  flick should keep the speed it had; check that casement's commit sees it (a held lift added
+  stationary time before).
 - DWT: libinput's disable-while-typing is on for the virtual pad, which may swallow a scroll or a
   swipe right after typing. casement-side; recorded for the shell brief.
 - `ToHost::Swipe` is no longer sent and the shell ignores it: delete the variant (and `Topic::Swipe`)
   from `palmrest-protocol` in lockstep with shell-host.
-- The shell stream keeps the carried-remainder rounding of the old quantiser (`feel/shell.rs`
-  `Carry`) so its values are unchanged; it wobbles by under a few px per sample when the gain
-  changes and may be simplified to `raw / rate` if the shell does not care.
+- The shell stream's px is `raw / rate * detent / hi-res` per sample (`feel/shell.rs`); the old
+  carried remainder is gone, because at a constant rate it cancelled and when the gain changed it
+  only added sub-pixel wobble.
 
 **Settings that are constants (2026-10-27).** Only `scroll.speed` and the six
 `gestures.gesture_action_map.*` rows are settings; macOS offers a scrolling speed and a choice of
 what gestures do, and nothing else of palmrest's numbers is a choice a person makes. The
 numbers design/22 §3.9/§3.10 once listed as keys are constants beside the code that uses them:
-the axis lock (`gestures/stroke/rule.rs`: 1538 / 571 um thresholds, ratio 1.5, 250 ms timeout),
+the axis lock (`gestures/stroke/rule.rs`: 1538 / 571 um thresholds, ratio 1.5, 250 ms timeout for a scroll; a swipe's lock does not time out),
 the shell's 60 px detent (`feel/shell.rs`), the acceleration curve (`feel/curve.rs`: `v0` 1500, `s` 3000, `p` 1.6, `g_max` 6.0),
 palm rejection (`gestures/bands.rs`, `gestures/contacts/rejection.rs`, `tracker/mod.rs`), the
 swipe, one-finger swipe and taps (`gestures/swipe.rs`, `one_swipe.rs`, `tap.rs`) and the
-virtual touchpad (`outputs/pad/`: 20 mm and 12 mm spacing, the libinput zones, 200 ms minimum down). A file
+virtual touchpad (`outputs/pad/`: 20 mm and 12 mm spacing, the libinput zones, 200 ms minimum down for a scroll). A file
 written with the removed keys still loads: an unknown key is ignored. Also hard-coded: the
 timestamp calibration constants (10 s fit window, 60 s refit, 1 ms residual) and the pad
 geometry (4000 x 2800 units at 40/mm). 22-SETTINGS §4.3 sketches a flat
@@ -176,8 +182,7 @@ produced once by the retired Python daemon and nothing regenerates them. The scr
 goldens (`feel_*.golden`, cumulative v120 per report) pinned the `Classic` curve and went with
 it; what is kept of that discipline: `feel` computes `dt` and the lock timeout as differences of
 float seconds (`Mono::float_since`), because integer-nanosecond `dt` moves a truncation by one
-unit, and socket px are the stream before truncation (whole units plus the carried remainder
-at the current rate).
+unit, and socket px are the stream before truncation (each sample's raw units over its own rate).
 
 **A millimetre frame over the Magic Mouse's own grid.** The tracker consumes `Frame`s from a
 `Sensor`, and every length threshold is configured in micrometres. The core does not compute in
@@ -202,13 +207,14 @@ moment it moves 30 units within 150 ms. P3 turns a counted contact Palm for life
 the scroll. P5 is the Euclidean sum of mouse counts in the window. P4 (click guard) is a rule of its own, as 12.3.3 lists it apart from P1-P3 and P5.
 
 **Tap geometry.** "Each contact moves < 40" is Euclidean from each contact's own landing
-point. The second tap's "within 300 units" compares centroids taken when each tap reached its
+point, and 40 units is the axis lock's own threshold (`stroke::LOCK_THRESHOLD_X/Y`, shared), so a
+tap never scrolls; the mouse-moving multiplier (P5) applies to the lock, not to taps. The second tap's "within 300 units" compares centroids taken when each tap reached its
 peak count: the first report of a two-finger tap usually has one finger, whose position is
 ~250 units from the pair's centroid.
 
 **Phases where 12.3.5 is silent.** Every `MayBegin` is closed by exactly one `Ended` or
-`Cancelled` (checked over every fixture). A two-finger set that locks sideways (Blocked) emits
-no further phase until it ends. After a `Cancelled` with fingers still down, the next lock
+`Cancelled` (checked over every fixture). A two-finger set that locks sideways is a Spaces swipe:
+the shell sees its `MayBegin` and its `Ended` and no `Began`. After a `Cancelled` with fingers still down, the next lock
 emits `MayBegin` then `Began` under a new id. `Touches{Down}` precedes a report's scroll phases,
 `Touches{Up}` follows them.
 
@@ -268,10 +274,10 @@ continuous, and with `p > 1` its slope is continuous at `v0` (tests in `feel/cur
 Constants: `v0 = 1500` (~21 mm/s along y), `s = 3000`, `p = 1.6`, `g_max = 6.0` (reached at
 9703 units/s). A starting point for a bake-off on recorded sessions, not a measurement.
 
-**No synthesized momentum, no wheel output (2026-10-27).** Foreign clients get the virtual
+**No synthesized momentum, no wheel output (2026-10-27; history).** Foreign clients get the virtual
 touchpad only: at a locked stroke's Ended the pad lifts and the app runs its own kinetic scroll.
-The opt-in `foreign_momentum = "ours"` glide (design/11 §11.5.1 drag, `feel/momentum.rs`,
-`tracker/coast.rs`), the `"palmrest wheel"` device (`foreign_output = "wheel"`) and the
+The opt-in `foreign_momentum = "ours"` glide (design/11 §11.5.1 drag; `feel/momentum.rs` and
+`tracker/coast.rs` no longer exist), the `"palmrest wheel"` device (`foreign_output = "wheel"`) and the
 `foreign_output = "off"` choice were deleted with their keys: none is a choice a person makes.
 
 **The `Sensor` enum and the evdev sensor.** `fn surface(&self) -> Surface` (extent in mm,

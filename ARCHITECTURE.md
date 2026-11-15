@@ -4,8 +4,9 @@ palmrest is the Magic Mouse 2 gesture daemon: it reads touch reports, turns them
 gesture streams, and delivers them over a socket to shell-host surfaces and, through virtual
 input devices, to every other client. `README.md` has the data flow, the socket protocol and
 the safety rules; quire's `design/12-BEHAVIOUR-gestures.md` is the specification;
-`CONVENTIONS.md` names the style guides every repo follows; `FINDINGS.md` the open items and standing
-facts. This file is the map: where each thing lives, what may depend on what, and how to add
+`CONVENTIONS.md` points to the published Rust guides and gives three design directions (push IO to
+the edges, let types carry the facts, judgement over rules); `FINDINGS.md` holds the open items and
+standing facts. This file is the map: where each thing lives, what may depend on what, and how to add
 the next thing. palmrest depends on no shell crate and runs on any Linux.
 
 ## 1. Crate map
@@ -36,7 +37,6 @@ daemon, `sys` and the CLI verbs are `pub(crate)`; the one public entry to them i
 | `main.rs` verbs (`record_cmd`, `replay_cmd`, `check_uinput`, usage, arguments) | `command/{mod.rs (Command, parse, run), record.rs, replay.rs, probe.rs}`; `main.rs` is `fn main() -> ExitCode { palmrest::command::run(std::env::args()) }` |
 | `gestures/live.rs`, the seven `gestures.live_workspace_*` keys | deleted (section 8) |
 | `tests/socket.rs`, `tests/latency.rs` | unit tests beside `daemon/socket.rs` and `daemon/latency.rs` |
-| `tests/acceptance_1_decode.rs`, `acceptance_2_reference_feel.rs` (retired with the classic curve), `acceptance_3_reference_cases.rs`, `acceptance_4_to_7.rs` | `tests/decode.rs`, `tests/palmrest/reference_cases.rs`, `tests/palmrest/gestures_replay.rs` (named after what they test) |
 
 ## 2. Modules and layers
 
@@ -71,12 +71,6 @@ out the effects it gets back.
 `lib.rs` holds declarations and these root re-exports only: `Config`, `Mono`, `Sensor`,
 `Frame`, `Surface`, `Tracker`, `Out`.
 
-### Files near the split line
-
-`feel/lock.rs` (398), `gestures/contacts.rs` (375), `tests/acceptance_3_reference_cases.rs`
-(370) and `tests/acceptance_4_to_7.rs` (359) split by concept when next touched: lock
-decision vs lock parameters, contact tracking vs palm turn, one file per scenario family.
-
 ## 3. One home
 
 | Concept | Home |
@@ -94,7 +88,7 @@ decision vs lock parameters, contact tracking vs palm turn, one file per scenari
 | Every transfer function from mm to an output, one per sink | `feel::shell` (px for the shell, with `feel::curve`), `feel::pad` (pad distance) |
 | Gesture state of the daemon | `tracker::Tracker` |
 | What each sink makes of a stroke event | `tracker::strokes` |
-| The virtual touchpad session: landing, following, lifting, the libinput zones | `outputs::pad` (`layout` for the geometry) |
+| The virtual touchpad session: landing, following, lifting, the libinput zones, and what may be down under a claim or a locked session | `outputs::pad` (`layout` for the geometry, `Policy` for what is allowed: the one place the pad's silence is decided) |
 | What the tracker asks for | `tracker::Out` |
 | Gesture to action table, what an action asks of the shell | `action`, `keys` |
 | Socket messages | `palmrest-protocol` |
@@ -133,7 +127,7 @@ device, of `Setting` for a new value type. Add a new trait only when two real im
 are swapped at a boundary. The next candidate is a second source of the daemon's clock and
 environment (`daemon::Env`); it is a plain struct until a fake exists.
 
-**Closed enums that stay enums:** `Out`, `Action`, `Gesture`, `ToHost`, `ToDaemon`, `Phase`,
+**Closed enums that stay enums:** `Out`, `Action`, `Gesture`, `ToHost`, `ToDaemon`, `Phase`, `Moment` (what each phase of a stroke carries),
 `Over`, `Sensor` (the two kinds of device), `RecordedSource` (which one a node or recording is).
 
 ## 5. Recipes
@@ -146,8 +140,10 @@ environment (`daemon::Env`); it is a plain struct until a fake exists.
 2. Its thresholds as named constants at the top of its file (`Um` for lengths, `Ms` for times), not as keys: a gesture's tuning numbers are not settings.
 3. `action.rs`: a `Gesture` variant when it fires an action, its default in the
    `gesture_action_map` table, and its `Action` mapping in `plan` if it needs a new action.
-4. `tracker/mod.rs`: one field for the recogniser, one call in `step`, one arm turning its
-   event into `Out`s (`tracker/out.rs`). The gesture never talks to the socket directly.
+4. `tracker/mod.rs`: its state as a field of `Tracker` (as `stroke`, `one`, `swipe` and `tap` are),
+   one call in `step`, one arm turning its event into `Out`s (`tracker/out.rs`, or
+   `tracker/strokes.rs` for what a stroke event causes). The gesture never talks to the socket
+   directly.
 5. If the host must see it: a `ToHost` variant in `palmrest-protocol` (the protocol changes:
    bump `PROTOCOL_VERSION`, update the round-trip test and shell-host in the same change).
 6. Tests: a table test of the recogniser beside it; a scenario in `tests/support/scenarios.rs`
@@ -265,11 +261,15 @@ node for writing, or reads a real config directory or a running daemon.
 
 palmrest does not model the swipe's progress, overshoot or commit: casement does, on any
 touchpad. A two-finger sideways stroke (the recogniser's `SpaceSwipe`) lands four contacts on the
-virtual touchpad that follow the fingers' x 1:1 and lift when the fingers do; casement decides to
-commit or return on the lift. It is live while both two-finger rows of
+virtual touchpad that follow the fingers' x 1:1 and lift the moment the fingers do (no minimum
+time down: libinput only taps with up to three fingers); casement decides to commit or return on
+the lift. A pause does not end a swipe (only a scroll's lock times out), and a click or a palm
+during one moves the row back to where it landed before it lifts, so casement returns to the Space
+it was on. It is live while both two-finger rows of
 `[gestures.gesture_action_map]` are the workspace defaults. Any other mapping fires its action once
 per 7.7 mm of travel (500 ms cooldown) from the same intent (`gestures::swipe`). The swipe runs
-whoever holds the pointer, and not while the session is locked. `ToHost::Swipe` is not sent; its
+whoever holds the pointer, and not while the session is locked: the lock screen lifts a running
+swipe at once (`Tracker::with_session_lock` returns the lift). `ToHost::Swipe` is not sent; its
 variant stays in the protocol until shell-host drops it in lockstep.
 
 ## 9. Migration order
@@ -284,9 +284,7 @@ Each step keeps master green (the gate above).
 3. (done) Move `sys.rs` and `outputs/uinput.rs` into `daemon/`; make `daemon` and its `sys` `pub(crate)`.
 4. (done) Move `tests/socket.rs` and `tests/latency.rs` in-crate; add `command/`, reduce `main.rs`;
    `daemon::Env` replaces the `std::env` reads in `main.rs` and `daemon/mod.rs`.
-5. (done) Rename the acceptance test files.
-6. (done) Split `feel/lock.rs` and `gestures/contacts.rs` by concept.
-7. (done) Trim `lib.rs` to declarations and the root list in section 2.
+5. (done) Trim `lib.rs` to declarations and the root list in section 2.
 
 ## 10. The virtual devices and the input service
 

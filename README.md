@@ -58,7 +58,7 @@ sensor's millimetres feel the same per millimetre.
 | `action`, `keys` | the gesture -> action table and what an action asks of the shell (the same on every desktop) |
 | `palmrest-protocol` (crate) | the socket messages and their codec (12.3.10) |
 | `config` | `gestures.toml`, lenient per key, the watch |
-| `outputs` | the `Emitter` seam, `RecordingEmitter`, the virtual touchpad session (`pad`: scroll pair and four-finger Spaces swipe), evdev event encoding |
+| `outputs` | the `Emitter` seam, `RecordingEmitter`, the virtual touchpad session (`pad`: scroll pair and four-finger Spaces swipe, and the policy of what may be down), evdev event encoding |
 | `recording`, `replay` | the `palmrest record` file (v1 hidraw, v2 any sensor) and the replay used by every acceptance test |
 | `daemon` | threads, socket, discovery and backoff, the sensor node (hidraw), devices, record, latency, the virtual-device emitter over the input service (and the direct fallback), `sys`: the evdev and uinput ioctls through `input-linux`'s safe handles, and `hidioc`: the one hidraw ioctl, the only module allowed `unsafe` |
 
@@ -115,8 +115,9 @@ runs a key or a desktop action; scrolling and the stream to subscribers go on.
 
 Scroll px are in finger direction (+x right, +y toward the user) with the acceleration applied; the
 host applies natural scrolling. `Swipe` is no longer sent: a two-finger sideways stroke reaches the
-compositor as a four-finger swipe on the virtual touchpad (or fires its action when the two-finger
-rows are remapped), and the shell sees it only as a `MayBegin` closed by `Ended` with no axis. Every `MayBegin` is closed by exactly one `Ended` or
+compositor as a four-finger swipe on the virtual touchpad that lifts as the fingers do and returns
+to its Space on a click or a palm (or fires its action when the two-finger rows are remapped), and
+the shell sees it only as a `MayBegin` closed by `Ended` with no axis. Every `MayBegin` is closed by exactly one `Ended` or
 `Cancelled`.
 
 ## Safety rules
