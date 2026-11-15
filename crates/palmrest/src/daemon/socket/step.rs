@@ -18,7 +18,7 @@ impl Subscribers {
             SocketEvent::Hangup { id } => (self.without(id), vec![]),
             SocketEvent::SeatSeen { uid } => self.seat_seen(uid),
             SocketEvent::ClaimsSeen(claims) => (self.with_claims(claims), vec![]),
-            SocketEvent::FromReader(message) => self.from_reader(message),
+            SocketEvent::FromReader(message) => self.deliver(message),
             SocketEvent::AcceptFailed { errno } => (self, accept_failed(errno, now)),
             SocketEvent::Tick => self.publish(),
         }

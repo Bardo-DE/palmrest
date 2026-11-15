@@ -6,7 +6,7 @@ use super::seat::Peer;
 use palmrest_protocol::{HostAction, PROTOCOL_VERSION, ToHost};
 
 impl Subscribers {
-    pub(super) fn from_reader(self, message: ToSocket) -> (Self, Vec<SocketEffect>) {
+    pub(super) fn deliver(self, message: ToSocket) -> (Self, Vec<SocketEffect>) {
         match message {
             ToSocket::Device(device) => {
                 let hello = ToHost::Hello {

@@ -77,9 +77,10 @@ impl Devices {
     }
 
     fn perform_all(&mut self, effects: Vec<Effect>) -> bool {
+        // Every effect is performed: `|` does not short-circuit.
         effects
             .into_iter()
-            .fold(false, |lost, effect| self.perform(effect) || lost)
+            .fold(false, |lost, effect| lost | self.perform(effect))
     }
 
     /// Whether the effect says the devices were lost.
