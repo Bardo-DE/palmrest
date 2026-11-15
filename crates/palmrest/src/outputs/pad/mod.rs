@@ -10,12 +10,13 @@
 //!   stops.
 //!
 //! Contacts land at the decision (never at MayBegin, so a resting finger makes nothing). A
-//! scroll's are held down until `MIN_DOWN` so libinput's tap timeout has passed, and are not
-//! lifted to land again before then either (measured 2026-11-15: a flick's last reverse step
-//! re-landed contacts that had just landed, and libinput read the pair as a two-finger tap, a
-//! right click). A swipe's lift
-//! at once, since libinput only taps with up to three fingers and a held swipe would add
-//! stationary time to a flick. A cancelled swipe returns to where it landed before it lifts, so
+//! scroll's two contacts never lift before `MIN_DOWN` (`Down::could_tap`): libinput reads two
+//! contacts that go down and up inside its tap timeout without moving as a two-finger tap, a
+//! right click (measured 2026-11-15: a flick's last reverse step re-landed contacts that had just
+//! landed). An ending, cancelled or no longer allowed scroll lifts at `MIN_DOWN`, one out of room
+//! stops at the edge until then, and a new scroll over a pending lift takes the contacts over. A
+//! swipe's lift at once, since libinput only taps with up to three fingers and a held swipe would
+//! add stationary time to a flick. A cancelled swipe returns to where it landed before it lifts, so
 //! the compositor sees no travel and stays on its Space. `policy` says what may be down at all;
 //! `layout` has the geometry and the libinput zones it keeps clear of.
 
@@ -87,17 +88,45 @@ pub enum Pad {
     #[default]
     Up,
     Down(Down),
-    /// A scroll ended but the lift waits until `until`.
+    /// A scroll ended but its contacts stay where they are until `until`.
     Lifting {
-        intent: Intent,
+        down: Down,
         until: Mono,
     },
 }
 
+impl Down {
+    /// When lifting these contacts is no longer a tap to libinput.
+    fn safe_from(&self) -> Mono {
+        self.landed.after(MIN_DOWN.duration())
+    }
+
+    /// Whether lifting these contacts at `now` could read as a tap: a scroll's two contacts
+    /// younger than `MIN_DOWN`. A swipe's four never tap.
+    fn could_tap(&self, now: Mono) -> bool {
+        matches!(self.intent, Intent::Scroll(_)) && now < self.safe_from()
+    }
+
+    /// A pending lift of these contacts, at the earliest moment it is not a tap.
+    fn lifting(self) -> Pad {
+        Pad::Lifting {
+            until: self.safe_from(),
+            down: self,
+        }
+    }
+}
+
 impl Pad {
     /// A stroke decided its intent: land its contacts, on the side opposite `lead`'s motion
-    /// (lifting a pending row first, so the tool count never changes under a client's feet).
+    /// (lifting a pending row first, so the tool count never changes under a client's feet). A
+    /// scroll over a pending scroll's lift takes its contacts over instead, where they are, so
+    /// they never go up as a tap.
     pub fn land(self, intent: Intent, lead: Motion, now: Mono) -> (Self, Vec<PadFrame>) {
+        if let Pad::Lifting { down, .. } = self
+            && layout::shape(down.intent).fingers == layout::shape(intent).fingers
+        {
+            return (Pad::Down(Down { intent, ..down }), vec![]);
+        }
         let (_, lifted) = self.lift_now();
         let at = layout::landing(intent, lead);
         let shape = layout::shape(intent);
@@ -135,7 +164,7 @@ impl Pad {
                     }
                     // Young contacts that lifted without moving would be a tap to libinput,
                     // and two fingers tapping is a right click: they wait at the edge instead.
-                    layout::Next::OutOfRoom if now < down.landed.after(MIN_DOWN.duration()) => {
+                    layout::Next::OutOfRoom if down.could_tap(now) => {
                         let at = layout::held(intent, down.at, by);
                         let moved = (at != down.at).then(|| PadFrame::Move { at: point(at) });
                         (
@@ -158,27 +187,16 @@ impl Pad {
     /// is younger than that: one older has outlived the tap timeout whatever it moved.
     pub fn end(self, now: Mono) -> (Self, Vec<PadFrame>) {
         match self {
+            Pad::Down(down) if down.could_tap(now) => (down.lifting(), vec![]),
+            // A swipe's row catches up with the fingers before it lifts, so the compositor
+            // reads the whole travel and the last report's speed.
             Pad::Down(down) => {
-                let until = down.landed.after(MIN_DOWN.duration());
-                match down.intent {
-                    Intent::Scroll(_) if now < until => (
-                        Pad::Lifting {
-                            intent: down.intent,
-                            until,
-                        },
-                        vec![],
-                    ),
-                    // A swipe's row catches up with the fingers before it lifts, so the
-                    // compositor reads the whole travel and the last report's speed.
-                    _ => {
-                        let catch_up =
-                            (down.shown != down.at).then(|| PadFrame::Move { at: point(down.at) });
-                        (
-                            Pad::Up,
-                            catch_up.into_iter().chain([PadFrame::Lift]).collect(),
-                        )
-                    }
-                }
+                let catch_up =
+                    (down.shown != down.at).then(|| PadFrame::Move { at: point(down.at) });
+                (
+                    Pad::Up,
+                    catch_up.into_iter().chain([PadFrame::Lift]).collect(),
+                )
             }
             other => (other, vec![]),
         }
@@ -192,7 +210,7 @@ impl Pad {
             swipe @ Pad::Down(Down {
                 intent: Intent::SpaceSwipe,
                 ..
-            }) => swipe.withdraw(),
+            }) => swipe.withdraw(now),
             other => other.end(now),
         }
     }
@@ -213,19 +231,22 @@ impl Pad {
         }
     }
 
-    /// Lifts at once whatever the policy no longer allows: a host took the pointer from a
-    /// scroll, or the session locked on a swipe.
-    pub fn enforce(self, policy: Policy) -> (Self, Vec<PadFrame>) {
+    /// Takes away whatever the policy no longer allows: a host took the pointer from a scroll,
+    /// or the session locked on a swipe.
+    pub fn enforce(self, policy: Policy, now: Mono) -> (Self, Vec<PadFrame>) {
         match self.intent() {
-            Some(intent) if !policy.allows(intent) => self.withdraw(),
+            Some(intent) if !policy.allows(intent) => self.withdraw(now),
             _ => (self, vec![]),
         }
     }
 
-    /// Takes the contacts away now. A swipe is first returned to where it landed, so the
+    /// Takes the contacts away: now, or for a scroll that could still tap at `MIN_DOWN`, still
+    /// (a pending lift stays pending). A swipe is first returned to where it landed, so the
     /// compositor puts the Space back instead of committing the one it was moving to.
-    fn withdraw(self) -> (Self, Vec<PadFrame>) {
+    fn withdraw(self, now: Mono) -> (Self, Vec<PadFrame>) {
         match self {
+            Pad::Down(down) if down.could_tap(now) => (down.lifting(), vec![]),
+            lifting @ Pad::Lifting { .. } => (lifting, vec![]),
             Pad::Down(Down {
                 intent: Intent::SpaceSwipe,
                 origin,
@@ -252,7 +273,7 @@ impl Pad {
         match self {
             Pad::Up => None,
             Pad::Down(down) => Some(down.intent),
-            Pad::Lifting { intent, .. } => Some(*intent),
+            Pad::Lifting { down, .. } => Some(down.intent),
         }
     }
 }

@@ -229,24 +229,67 @@ fn the_policy_lifts_what_it_no_longer_allows_and_nothing_else() {
         session: LockState::Locked,
         ..OPEN
     };
+    let late = Mono::from_millis(300);
     let (scroll, _) = Pad::Up.land(DOWN, lead(0.0, 1.0), Mono(0));
     let (swipe, _) = Pad::Up.land(SWIPE, lead(1.0, 0.0), Mono(0));
-    assert_eq!(scroll.enforce(claimed), (Pad::Up, vec![PadFrame::Lift]));
     assert_eq!(
-        swipe.enforce(claimed),
+        scroll.enforce(claimed, late),
+        (Pad::Up, vec![PadFrame::Lift])
+    );
+    assert_eq!(
+        swipe.enforce(claimed, late),
         (swipe, vec![]),
         "a claim leaves a swipe"
     );
-    assert_eq!(swipe.enforce(locked), (Pad::Up, vec![PadFrame::Lift]));
+    assert_eq!(swipe.enforce(locked, late), (Pad::Up, vec![PadFrame::Lift]));
     assert_eq!(
-        scroll.enforce(locked),
+        scroll.enforce(locked, late),
         (scroll, vec![]),
         "a lock leaves a scroll"
     );
-    assert_eq!(scroll.enforce(OPEN), (scroll, vec![]));
-    assert_eq!(Pad::Up.enforce(locked), (Pad::Up, vec![]));
-    let (waiting, _) = scroll.end(Mono::from_millis(10));
-    assert_eq!(waiting.enforce(claimed), (Pad::Up, vec![PadFrame::Lift]));
+    assert_eq!(scroll.enforce(OPEN, late), (scroll, vec![]));
+    assert_eq!(Pad::Up.enforce(locked, late), (Pad::Up, vec![]));
+}
+
+/// A claim on a scroll younger than the tap timeout keeps its contacts still until then: lifted
+/// at once they would be a two-finger tap, a right click.
+#[test]
+fn a_claim_on_a_young_scroll_lifts_it_at_the_tap_timeout() {
+    let claimed = Policy {
+        claimed: Over::Ours,
+        ..OPEN
+    };
+    let (scroll, _) = Pad::Up.land(DOWN, lead(0.0, 1.0), Mono(0));
+    let (pad, frames) = scroll.enforce(claimed, Mono::from_millis(50));
+    assert_eq!(frames, []);
+    assert_eq!(pad.deadline(), Some(Mono::from_millis(200)));
+    let (pad, frames) = pad.enforce(claimed, Mono::from_millis(60));
+    assert_eq!(frames, [], "a pending lift stays pending");
+    let (_, frames) = pad.moved(DOWN, lead(0.0, 5.0), Mono::from_millis(70));
+    assert_eq!(frames, [], "and nothing moves it");
+    assert_eq!(
+        pad.tick(Mono::from_millis(200)),
+        (Pad::Up, vec![PadFrame::Lift])
+    );
+}
+
+/// A scroll that starts while the last one's young contacts wait to lift takes them over, so
+/// they never go up as a tap; a swipe needs four contacts and lands its own.
+#[test]
+fn a_scroll_over_a_pending_lift_takes_its_contacts_over() {
+    let (pad, _) = Pad::Up.land(DOWN, lead(0.0, 1.0), Mono(0));
+    let (pad, _) = pad.moved(DOWN, lead(0.0, 2.0), Mono::from_millis(20));
+    let (pending, _) = pad.end(Mono::from_millis(40));
+    let (pad, frames) = pending.land(UP_RIGHT, lead(-1.0, 0.0), Mono::from_millis(60));
+    assert_eq!(frames, []);
+    let (_, frames) = pad.moved(UP_RIGHT, lead(-3.0, 0.0), Mono::from_millis(70));
+    assert_eq!(
+        frames,
+        [PadFrame::Move {
+            at: PadPoint { x: 1880, y: 280 }
+        }],
+        "from where they were (50 mm, 7 mm), 3 mm to the left"
+    );
 }
 
 #[test]

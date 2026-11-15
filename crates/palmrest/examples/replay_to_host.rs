@@ -90,7 +90,8 @@ fn to_host_lines(file: &Path, held: Over) -> Result<Vec<String>, String> {
 /// reads and after the last one until it has none left.
 fn to_host(source: &RecordedSource, records: &[Record], held: Over) -> Vec<ToHost> {
     let mut sensor = source.sensor();
-    let (mut tracker, claim) = Tracker::on(Config::default(), sensor.surface()).claim(held);
+    let (mut tracker, claim) =
+        Tracker::on(Config::default(), sensor.surface()).claim(held, Mono(0));
     let mut clock = StampClock::new();
     let mut outs = claim;
     for r in records {

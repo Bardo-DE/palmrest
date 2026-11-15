@@ -161,9 +161,9 @@ impl Tracker {
         }
     }
 
-    /// Lifts at once whatever the pad's policy no longer allows (after a claim or a lock).
-    pub(super) fn enforce(self) -> (Self, Vec<Out>) {
-        let (pad, frames) = self.pad.enforce(self.policy());
+    /// Takes away whatever the pad's policy no longer allows (after a claim or a lock).
+    pub(super) fn enforce(self, now: Mono) -> (Self, Vec<Out>) {
+        let (pad, frames) = self.pad.enforce(self.policy(), now);
         (Self { pad, ..self }, pad_outs(frames))
     }
 }

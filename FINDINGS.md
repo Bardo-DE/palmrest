@@ -83,8 +83,17 @@ a two-finger tap: a right click (Zen opened its context menu). A scroll's landin
 little room behind it (none for a vertical scroll, 5 mm for a horizontal one), so the small
 reverse step at the end of a flick re-landed the contacts, and the next reverse step re-landed
 the new ones before they moved. Contacts younger than `MIN_DOWN` now stop at the edge instead of
-landing again (`outputs/pad`, `layout::held`). Other paths still lift young contacts at once (a
-claim, a lock, a new stroke over a pending lift, a disconnect); none has been seen to tap.
+landing again (`outputs/pad`, `layout::held`). Every other lift of a scroll follows the same
+rule (`Down::could_tap`): an ending, cancelled, claimed or locked scroll lifts at `MIN_DOWN` at
+the earliest, and a new scroll over a pending lift takes the contacts over. Two lifts stay
+immediate: a Spaces swipe starting over a pending scroll lift (it needs four contacts of its
+own) and a disconnect (the mouse is gone); neither has been seen to tap.
+
+**Back while scrolling sideways is the one-finger flick (2026-11-15).** The same capture showed
+Alt+Left at the end of two fast horizontal scrolls. A horizontal stroke with two fingers is the
+Spaces swipe, so those were one-finger strokes, and a quick one-finger flick is Back/Forward
+(`one_swipe`, the Magic Mouse's "swipe between pages"). Working as shipped;
+`one_finger_swipe_left/right = "none"` turns it off.
 
 **Device checks for the pad strokes (open).**
 - libinput's scroll ratio in numbers: screen px per mm of finger for a slow and a fast stroke

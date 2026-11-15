@@ -7,7 +7,7 @@ use palmrest::config::Config;
 use palmrest::keys::{Key, KeyCombo};
 use palmrest::replay::{Timing, feed, outs, replay};
 use palmrest::stamp::StampClock;
-use palmrest::{Out, Tracker};
+use palmrest::{Mono, Out, Tracker};
 use palmrest_protocol::{Axis, LockState, Over, Phase, TapKind, ToHost, Workspace};
 
 /// The shipped settings with both two-finger swipes mapped the other way round: not the
@@ -38,7 +38,7 @@ fn run(name: &str) -> Vec<Out> {
 
 /// Replays with a host holding the pointer from the start.
 fn run_claimed(name: &str) -> Vec<Out> {
-    let (t, _) = Tracker::new(Config::default()).claim(Over::Ours);
+    let (t, _) = Tracker::new(Config::default()).claim(Over::Ours, Mono(0));
     run_from(t, name)
 }
 
@@ -55,7 +55,7 @@ fn run_remapped(name: &str) -> Vec<Out> {
 fn run_locked(name: &str) -> Vec<Out> {
     run_from(
         Tracker::new(remapped())
-            .with_session_lock(LockState::Locked)
+            .with_session_lock(LockState::Locked, Mono(0))
             .0,
         name,
     )
@@ -410,6 +410,6 @@ fn claiming_mid_stroke_lifts_the_touchpad() {
         let (nt, nc, _) = feed(t, clock, r, Timing::Arrival);
         (t, clock) = (nt, nc);
     }
-    let (_, lifted) = t.claim(Over::Ours);
+    let (_, lifted) = t.claim(Over::Ours, records[30].at);
     assert_eq!(lifted, [Out::Pad(palmrest::outputs::pad::PadFrame::Lift)]);
 }

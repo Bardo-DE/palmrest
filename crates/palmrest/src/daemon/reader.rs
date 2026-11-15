@@ -117,8 +117,8 @@ impl Reader {
         }
         while let Ok(note) = self.notes.try_recv() {
             self = match note {
-                FromSocket::Pointer(over) => self.with_tracker(|t| t.claim(over)),
-                FromSocket::Session(lock) => self.with_tracker(|t| t.with_session_lock(lock)),
+                FromSocket::Pointer(over) => self.with_tracker(|t| t.claim(over, now)),
+                FromSocket::Session(lock) => self.with_tracker(|t| t.with_session_lock(lock, now)),
                 FromSocket::UserConfig(text) => {
                     self.user = text;
                     self.with_layers(now)

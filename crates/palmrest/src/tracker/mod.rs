@@ -108,19 +108,20 @@ impl Tracker {
     /// The lock screen's state, as the shell last said it. While the session is locked no
     /// gesture runs a key or a desktop action and no Spaces swipe starts; a swipe that was
     /// running lifts at once. Scrolling and the socket stream go on.
-    pub fn with_session_lock(self, session: LockState) -> (Self, Vec<Out>) {
-        Self { session, ..self }.enforce()
+    pub fn with_session_lock(self, session: LockState, now: Mono) -> (Self, Vec<Out>) {
+        Self { session, ..self }.enforce(now)
     }
 
     /// A host claimed or released the pointer (the aggregate over subscribers). A scroll on the
-    /// virtual touchpad lifts at once when a host takes over, so nothing is left pressed under
-    /// our own surfaces. A Spaces swipe is the compositor's and goes on.
-    pub fn claim(self, over: Over) -> (Self, Vec<Out>) {
+    /// virtual touchpad lifts when a host takes over, so nothing is left pressed under our own
+    /// surfaces: at once, or still at `MIN_DOWN` if it is younger, so it is no tap. A Spaces
+    /// swipe is the compositor's and goes on.
+    pub fn claim(self, over: Over, now: Mono) -> (Self, Vec<Out>) {
         Self {
             claimed: over,
             ..self
         }
-        .enforce()
+        .enforce(now)
     }
 
     /// The virtual devices were lost and rebuilt: nothing is down on them any more, so the pad
