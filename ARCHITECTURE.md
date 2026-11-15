@@ -59,6 +59,15 @@ verb are the same harness: a recording file in, the core's outputs out, no clock
 `daemon` is where every thread, socket, device node and clock lives; the core never reaches
 into it.
 
+Inside `daemon`, the two machines with decisions follow the concept-directory shape: the pure part
+decides, a thin `io` part gathers the facts that need a syscall, feeds them in as events and carries
+out the effects it gets back.
+
+| Concept | `model.rs` | `step.rs` | `io.rs` |
+|---|---|---|---|
+| `socket/` (the subscribers) | `Subscribers`, `SocketEvent`, `SocketEffect` | `Subscribers::step(self, event, now) -> (Self, Vec<SocketEffect>)`, with `admit`, `packet`, `deliver`, `publish` | the poll loop, `accept`, the seat file, the vouch, the reader's channel; `conn.rs` holds the descriptors |
+| `devices/` (the virtual devices) | `Life`, `Event`, `Effect` | `step(Life, Event) -> (Life, Vec<Effect>)` | `Devices`: holds the emitter and the factory, performs `Create`, `DropEmitter` and `Log` |
+
 `lib.rs` holds declarations and these root re-exports only: `Config`, `Mono`, `Sensor`,
 `Frame`, `Surface`, `Tracker`, `Out`.
 
@@ -99,13 +108,14 @@ decision vs lock parameters, contact tracking vs palm turn, one file per scenari
 | Recording file format | `recording` |
 | Replaying recordings | `replay` |
 | Threads, sockets, discovery, backoff, nodes | `daemon` |
-| Subscribers of the socket: ids, caps, budgets, the joint claim and lock | `daemon::socket::{server, client, limits}` |
+| Subscribers of the socket: ids, admission, caps, the joint claim and lock, what the reader is told and when | `daemon::socket::{model, step}` (the pure `Subscribers::step`; `admit`, `packet`, `deliver`, `publish`, `aggregate` hold its parts), `limits` (the caps and budgets) |
+| The socket thread: polling, reading, the peer facts (uid, vouch, seat file), carrying out effects | `daemon::socket::{io, conn}` |
 | Who has the seat, and what a connection is to the daemon (shell, other program, stranger) | `daemon::socket::seat` (`peer_of`), `daemon::socket::shell` (`Steering`, palmrest's shell table); the shell check, the seat file and the accept failures are `latchkey::guard`, shared with keycap |
 | Actions that need the person's session (asked of the shell, never run here) | `action::plan` (the tracker's `Out::Deferred(Action)` becomes an `Option<HostAction>`), `palmrest_protocol::HostAction`, `ToHost::Run` |
 | The person's settings laid over the machine's | `config::layer`, `ToDaemon::UserConfig` |
 | What the shell says about the lock screen | `palmrest_protocol::ToDaemon::SessionLock`, `Tracker::with_session_lock` |
 | The virtual devices: what each is, asking the input service for them, the direct fallback | `daemon::uinput::{caps, emitter, direct, route}` |
-| When to rebuild the devices after a cut, and when to give up | `daemon::devices` |
+| When to rebuild the devices after a cut, and when to give up | `daemon::devices::{model, step}` (the pure lifecycle); `devices::io` holds the emitter and the factory |
 | evdev and uinput ioctls | `daemon::sys` (through `input-linux`, no `unsafe`) |
 | the hidraw feature ioctl and all `unsafe` | `daemon::hidioc` |
 | Environment, clock, directories | `daemon::Env`, built once in `command::run` |
@@ -165,7 +175,7 @@ environment (`daemon::Env`); it is a plain struct until a fake exists.
 2. `outputs/<name>.rs`: the pure model and its event encoding (tested by tables).
 3. `daemon/uinput/emitter.rs` (or `daemon/<backend>.rs` for another backend): the implementor of
    `Emitter`; the kernel calls go through `daemon/sys.rs` (`daemon/hidioc.rs` for hidraw).
-4. `daemon/dispatch.rs`: the `Out` arm that calls the emitter; `daemon/devices.rs` when the
+4. `daemon/dispatch.rs`: the `Out` arm that calls the emitter; `daemon/devices/` when the
    device is created lazily.
 5. Tests: encode tables; a replay test asserting the `RecordingEmitter`'s `Emitted` list. No
    test constructs a real device.
@@ -207,7 +217,7 @@ tests above as the guard that it cannot drift from `Config`.
 | Whole-core behaviour | replay: a recording through `replay::replay` with `RecordingEmitter`, asserting `Out`s and `Emitted`; strokes and fixtures from `tests/support` |
 | Another sensor | the same recording re-expressed as evdev events, replayed to identical outputs (`tests/evdev_parity.rs`) |
 | Decoder | goldens in `tests/fixtures/reference/`, frozen; the reference gesture cases in `tests/palmrest/reference_cases.rs` |
-| Socket | a private socket in a temp dir, beside `daemon/socket.rs` |
+| Socket | decisions as pure `Subscribers::step` tests over events (`daemon/socket/tests/{step, packet, aggregate}.rs`); a private socket in a temp dir for the wiring (`tests/{wiring, passes}.rs`) |
 | Latency | ignored release test beside `daemon/latency.rs` |
 
 The one harness is `replay` plus `tests/support`. No test creates an input device, opens a real
@@ -288,7 +298,7 @@ root service) does, and makes palmrest's three devices on request after checking
 | `caps.rs` | each device's identity and capabilities (used by `direct.rs`) |
 | `probe.rs` | `--check-uinput`: open a session and make a touchpad |
 
-Who rebuilds, and when to stop, is `daemon/devices.rs` and nothing else. `OutputError` says what
+Who rebuilds, and when to stop, is `daemon/devices/step.rs` and nothing else (`model.rs` holds the states, events and effects, `io.rs` the emitter and the factory that carry them out). A write that fails is returned once as an error: that error is the news that the devices were lost, and `dispatch` hands it to the reader. `OutputError` says what
 happened: `Unavailable` (the service is not there yet; retried without limit), `Write` (the
 device failed; rebuilt) and `Cut` (the service closed the connection, refused palmrest or timed
 out; counted). After a cut the devices are rebuilt with the 1 s, 2 s, 4 s, 5 s backoff, three
