@@ -130,16 +130,20 @@ impl Tracker {
         if map.two_finger_swipe_is_live() {
             return (self, vec![]);
         }
-        let mut swipe = self.swipe;
-        let mut outs = vec![];
-        for e in events {
-            let (next, fired) = swipe.step(e, now);
-            swipe = next;
-            for dir in fired {
+        let (swipe, fired) = events
+            .iter()
+            .fold((self.swipe, vec![]), |(swipe, mut fired), e| {
+                let (next, dir) = swipe.step(e, now);
+                fired.extend(dir);
+                (next, fired)
+            });
+        let outs = fired
+            .into_iter()
+            .flat_map(|dir| {
                 let action = map.action_for(Gesture::two_finger_swipe(dir));
-                outs.extend(action_outs(action, Source::Other, self.claimed));
-            }
-        }
+                action_outs(action, Source::Other, self.claimed)
+            })
+            .collect();
         let outs = while_unlocked(self.session, outs);
         (Self { swipe, ..self }, outs)
     }

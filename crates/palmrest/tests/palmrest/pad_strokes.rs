@@ -193,7 +193,8 @@ fn a_locked_session_has_no_swipe() {
 }
 
 #[test]
-fn a_session_that_locks_mid_swipe_lifts_it_at_once_and_the_rest_of_the_stroke_stays_off_the_pad() {
+fn a_session_that_locks_mid_swipe_returns_and_lifts_it_at_once_and_the_rest_of_the_stroke_stays_off_the_pad()
+ {
     let script = stroke(2, Axis::X, 45.0, 45, 12.0);
     let (half, rest) = script.records.split_at(25);
     let (t, before) = feed_all(Tracker::new(Config::default()), half);
@@ -203,10 +204,9 @@ fn a_session_that_locks_mid_swipe_lifts_it_at_once_and_the_rest_of_the_stroke_st
             .any(|f| matches!(f, PadFrame::Land { .. }))
     );
     let (t, on_lock) = t.with_session_lock(LockState::Locked);
-    assert_eq!(
-        pad(&on_lock),
-        [PadFrame::Lift],
-        "the lock call lifts it itself"
+    assert!(
+        matches!(pad(&on_lock)[..], [PadFrame::Move { .. }, PadFrame::Lift]),
+        "the lock call returns the row to where it landed and lifts it: {on_lock:?}"
     );
     let after = drive(t, rest);
     assert!(pad(&outs_of(&after)).is_empty());

@@ -154,15 +154,10 @@ impl Pad {
     /// compositor reads no travel and returns to the Space it was on.
     pub fn cancel(self, now: Mono) -> (Self, Vec<PadFrame>) {
         match self {
-            Pad::Down(Down {
+            swipe @ Pad::Down(Down {
                 intent: Intent::SpaceSwipe,
-                origin,
-                at,
                 ..
-            }) => {
-                let back = (at != origin).then(|| PadFrame::Move { at: point(origin) });
-                (Pad::Up, back.into_iter().chain([PadFrame::Lift]).collect())
-            }
+            }) => swipe.withdraw(),
             other => other.end(now),
         }
     }
@@ -187,8 +182,25 @@ impl Pad {
     /// scroll, or the session locked on a swipe.
     pub fn enforce(self, policy: Policy) -> (Self, Vec<PadFrame>) {
         match self.intent() {
-            Some(intent) if !policy.allows(intent) => self.lift_now(),
+            Some(intent) if !policy.allows(intent) => self.withdraw(),
             _ => (self, vec![]),
+        }
+    }
+
+    /// Takes the contacts away now. A swipe is first returned to where it landed, so the
+    /// compositor puts the Space back instead of committing the one it was moving to.
+    fn withdraw(self) -> (Self, Vec<PadFrame>) {
+        match self {
+            Pad::Down(Down {
+                intent: Intent::SpaceSwipe,
+                origin,
+                at,
+                ..
+            }) => {
+                let back = (at != origin).then(|| PadFrame::Move { at: point(origin) });
+                (Pad::Up, back.into_iter().chain([PadFrame::Lift]).collect())
+            }
+            other => other.lift_now(),
         }
     }
 
