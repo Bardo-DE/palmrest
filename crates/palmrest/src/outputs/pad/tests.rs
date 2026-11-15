@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::sensor::units::Mm;
-use palmrest_protocol::Axis;
+use palmrest_protocol::{Axis, LockState, Over};
 
 const DOWN: Intent = Intent::Scroll(Axis::Y);
 const UP_RIGHT: Intent = Intent::Scroll(Axis::X);
@@ -127,8 +127,8 @@ fn a_swipe_follows_x_only_and_stops_at_the_edge() {
 }
 
 #[test]
-fn a_short_stroke_holds_its_lift_past_the_tap_timeout() {
-    for intent in [DOWN, SWIPE] {
+fn a_short_scroll_holds_its_lift_past_the_tap_timeout() {
+    for intent in [DOWN, UP_RIGHT] {
         let (pad, _) = Pad::Up.land(intent, lead(1.0, 1.0), Mono(0));
         let (pad, frames) = pad.end(Mono::from_millis(80));
         assert!(frames.is_empty());
@@ -142,6 +142,13 @@ fn a_short_stroke_holds_its_lift_past_the_tap_timeout() {
 }
 
 #[test]
+fn a_swipe_lifts_the_moment_it_ends_however_young_it_is() {
+    let (pad, _) = Pad::Up.land(SWIPE, lead(1.0, 0.0), Mono(0));
+    let (pad, frames) = pad.end(Mono::from_millis(20));
+    assert_eq!((pad, frames), (Pad::Up, vec![PadFrame::Lift]));
+}
+
+#[test]
 fn a_new_landing_lifts_a_pending_one_first_so_the_tool_count_never_changes_in_place() {
     let (pad, _) = Pad::Up.land(DOWN, lead(0.0, 1.0), Mono(0));
     let (pad, _) = pad.end(Mono::from_millis(10));
@@ -150,14 +157,88 @@ fn a_new_landing_lifts_a_pending_one_first_so_the_tool_count_never_changes_in_pl
     assert!(matches!(frames[1], PadFrame::Land { fingers: 4, .. }));
 }
 
+/// Everything allowed, then the policy with one thing taken away.
+const OPEN: Policy = Policy {
+    claimed: Over::NotOurs,
+    session: LockState::Unlocked,
+    live_swipe: true,
+};
+
 #[test]
-fn a_claim_lifts_a_scroll_and_leaves_a_swipe() {
+fn the_policy_lifts_what_it_no_longer_allows_and_nothing_else() {
+    let claimed = Policy {
+        claimed: Over::Ours,
+        ..OPEN
+    };
+    let locked = Policy {
+        session: LockState::Locked,
+        ..OPEN
+    };
     let (scroll, _) = Pad::Up.land(DOWN, lead(0.0, 1.0), Mono(0));
-    assert_eq!(scroll.lift_scroll(), (Pad::Up, vec![PadFrame::Lift]));
     let (swipe, _) = Pad::Up.land(SWIPE, lead(1.0, 0.0), Mono(0));
-    assert_eq!(swipe.lift_scroll(), (swipe, vec![]));
-    assert_eq!(swipe.lift_swipe(), (Pad::Up, vec![PadFrame::Lift]));
-    assert_eq!(scroll.lift_swipe(), (scroll, vec![]));
+    assert_eq!(scroll.enforce(claimed), (Pad::Up, vec![PadFrame::Lift]));
+    assert_eq!(
+        swipe.enforce(claimed),
+        (swipe, vec![]),
+        "a claim leaves a swipe"
+    );
+    assert_eq!(swipe.enforce(locked), (Pad::Up, vec![PadFrame::Lift]));
+    assert_eq!(
+        scroll.enforce(locked),
+        (scroll, vec![]),
+        "a lock leaves a scroll"
+    );
+    assert_eq!(scroll.enforce(OPEN), (scroll, vec![]));
+    assert_eq!(Pad::Up.enforce(locked), (Pad::Up, vec![]));
+    let (waiting, _) = scroll.end(Mono::from_millis(10));
+    assert_eq!(waiting.enforce(claimed), (Pad::Up, vec![PadFrame::Lift]));
+}
+
+#[test]
+fn a_swipe_needs_the_live_mapping_and_an_unlocked_session_and_a_scroll_a_free_pointer() {
+    let remapped = Policy {
+        live_swipe: false,
+        ..OPEN
+    };
+    assert!(OPEN.allows(SWIPE) && OPEN.allows(DOWN));
+    assert!(!remapped.allows(SWIPE) && remapped.allows(DOWN));
+    let claimed = Policy {
+        claimed: Over::Ours,
+        ..OPEN
+    };
+    assert!(!claimed.allows(DOWN) && !claimed.allows(UP_RIGHT) && claimed.allows(SWIPE));
+}
+
+#[test]
+fn a_cancelled_swipe_returns_to_where_it_landed_before_it_lifts() {
+    let (pad, landed) = Pad::Up.land(SWIPE, lead(1.0, 0.0), Mono(0));
+    let PadFrame::Land { at: start, .. } = landed[0] else {
+        panic!("not a landing: {landed:?}");
+    };
+    let (pad, _) = pad.moved(SWIPE, lead(20.0, 0.0), Mono::from_millis(50));
+    let (pad, frames) = pad.cancel(Mono::from_millis(60));
+    assert_eq!(
+        frames,
+        [PadFrame::Move { at: start }, PadFrame::Lift],
+        "back to the landing x in one frame, then up"
+    );
+    assert_eq!(pad, Pad::Up);
+}
+
+#[test]
+fn a_cancelled_swipe_that_never_moved_just_lifts_and_a_cancelled_scroll_ends_as_usual() {
+    let (swipe, _) = Pad::Up.land(SWIPE, lead(1.0, 0.0), Mono(0));
+    assert_eq!(
+        swipe.cancel(Mono::from_millis(5)),
+        (Pad::Up, vec![PadFrame::Lift])
+    );
+    let (scroll, _) = Pad::Up.land(DOWN, lead(0.0, 1.0), Mono(0));
+    let (moved, _) = scroll.moved(DOWN, lead(0.0, 5.0), Mono::from_millis(10));
+    assert_eq!(
+        moved.cancel(Mono::from_millis(20)),
+        moved.end(Mono::from_millis(20))
+    );
+    assert_eq!(Pad::Up.cancel(Mono(0)), (Pad::Up, vec![]));
 }
 
 #[test]

@@ -1,11 +1,11 @@
 //! The phases of one stroke as the shell stream guarantees them: MayBegin when a set of one or
 //! two fingers lands; Began when the intent is decided; Changed per motion; Ended when the set
-//! ends, changes or the lock times out; Cancelled on a click or a palm. Every MayBegin is closed
-//! by exactly one Ended or Cancelled, so a host never holds a gesture open.
+//! ends, changes or a scroll's lock times out; Cancelled on a click or a palm. Every MayBegin is
+//! closed by exactly one Ended or Cancelled, so a host never holds a gesture open.
 
 use super::lock::Signal;
-use super::{Event, Intent};
-use palmrest_protocol::{GestureId, Phase};
+use super::{Event, Intent, Moment, Motion};
+use palmrest_protocol::GestureId;
 
 /// How far the current gesture has got.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -14,7 +14,7 @@ enum Stage {
     Announced,
     Began(Intent),
     /// The last gesture was Cancelled and the fingers are still down; the next decision opens
-    /// a new gesture.
+    /// a new gesture, announcing it first.
     Quiet,
 }
 
@@ -26,12 +26,20 @@ struct Open {
 }
 
 impl Open {
-    fn event(self, phase: Phase) -> Event {
-        let intent = match self.stage {
+    fn event(self, moment: Moment) -> Event {
+        Event {
+            gesture: self.id,
+            fingers: self.fingers,
+            moment,
+        }
+    }
+
+    /// The intent, once decided.
+    fn intent(self) -> Option<Intent> {
+        match self.stage {
             Stage::Began(intent) => Some(intent),
             Stage::Announced | Stage::Quiet => None,
-        };
-        Event::bare(self.id, self.fingers, phase, intent)
+        }
     }
 }
 
@@ -56,12 +64,14 @@ type Step = (Life, Vec<Event>);
 impl Life {
     /// Turns the lock's signals of one report into the phases they cause.
     pub fn apply(self, signals: Vec<Signal>) -> Step {
-        signals
-            .into_iter()
-            .fold((self, vec![]), |(life, events), s| {
-                let (life, more) = life.signal(s);
-                (life, events.into_iter().chain(more).collect())
-            })
+        let mut life = self;
+        let mut events = vec![];
+        for s in signals {
+            let (next, more) = life.signal(s);
+            life = next;
+            events.extend(more);
+        }
+        (life, events)
     }
 
     /// Cancels the running gesture (P3 palm, P4 click, disconnect); the fingers stay down.
@@ -76,7 +86,9 @@ impl Life {
                     }),
                     next_id: self.next_id + 1,
                 },
-                vec![open.event(Phase::Cancelled)],
+                vec![open.event(Moment::Cancelled {
+                    intent: open.intent(),
+                })],
             ),
             _ => (self, vec![]),
         }
@@ -91,10 +103,10 @@ impl Life {
     fn signal(self, s: Signal) -> Step {
         match s {
             Signal::Reset => self.close(),
-            Signal::Start { fingers } => and_then(self.close(), |l| l.announce(fingers)),
+            Signal::Start { fingers } => self.reopen(fingers),
             Signal::Unlocked => {
                 let fingers = self.open.map_or(1, |o| o.fingers);
-                and_then(self.close(), |l| l.announce(fingers))
+                self.reopen(fingers)
             }
             Signal::Locked { intent, lead } => self.locked(intent, lead),
             Signal::Moved { motion, dt_s } => match self.open {
@@ -102,32 +114,42 @@ impl Life {
                     stage: Stage::Began(intent),
                     id,
                     fingers,
-                }) => (
-                    self,
-                    vec![Event {
+                }) => {
+                    let moment = Moment::Changed {
+                        intent,
                         motion,
                         dt_s,
-                        ..Event::bare(id, fingers, Phase::Changed, Some(intent))
-                    }],
-                ),
+                    };
+                    let event = Event {
+                        gesture: id,
+                        fingers,
+                        moment,
+                    };
+                    (self, vec![event])
+                }
                 _ => (self, vec![]),
             },
         }
     }
 
-    fn locked(self, intent: Intent, lead: super::Motion) -> Step {
+    /// Closes the running gesture and announces a new one of `fingers`.
+    fn reopen(self, fingers: u8) -> Step {
+        let (life, mut events) = self.close();
+        let (life, announced) = life.announce(fingers);
+        events.extend(announced);
+        (life, events)
+    }
+
+    fn locked(self, intent: Intent, lead: Motion) -> Step {
         let Some(open) = self.open else {
             return (self, vec![]);
         };
-        let may_begin = (open.stage == Stage::Quiet).then(|| open.event(Phase::MayBegin));
+        let may_begin = (open.stage == Stage::Quiet).then(|| open.event(Moment::Announced));
         let began = Open {
             stage: Stage::Began(intent),
             ..open
         };
-        let event = Event {
-            motion: lead,
-            ..began.event(Phase::Began)
-        };
+        let event = began.event(Moment::Began { intent, lead });
         (
             Self {
                 open: Some(began),
@@ -141,7 +163,7 @@ impl Life {
         let ended = self
             .open
             .filter(|o| o.stage != Stage::Quiet)
-            .map(|o| o.event(Phase::Ended));
+            .map(|o| o.event(Moment::Ended { intent: o.intent() }));
         (Self { open: None, ..self }, ended.into_iter().collect())
     }
 
@@ -156,14 +178,7 @@ impl Life {
                 open: Some(open),
                 next_id: self.next_id + 1,
             },
-            vec![open.event(Phase::MayBegin)],
+            vec![open.event(Moment::Announced)],
         )
     }
-}
-
-/// `first`'s events, then those of `next` run on the state `first` came to.
-fn and_then(first: Step, next: impl FnOnce(Life) -> Step) -> Step {
-    let (life, events) = first;
-    let (life, more) = next(life);
-    (life, events.into_iter().chain(more).collect())
 }

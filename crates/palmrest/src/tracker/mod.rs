@@ -6,7 +6,7 @@
 //!
 //! It composes three things: the stroke recogniser (what the fingers did), the feel (what each
 //! output makes of it: `strokes`) and the pad session (the fingers the virtual touchpad puts
-//! down).
+//! down, and the policy that says when it may).
 
 mod out;
 mod strokes;
@@ -16,16 +16,14 @@ pub use out::{Out, Source, action_outs, tap_outs};
 
 use crate::action::Gesture;
 use crate::config::{Config, Count, Fraction, Ms};
-use crate::feel::shell::Carry;
 use crate::gestures::{
     Bands, ClickGuard, Contacts, Hold, Intent, MotionWindow, OneSwipe, Params, Recogniser, Sample,
-    StrokeEvent, SwipeFire, TapG,
+    SwipeFire, TapG,
 };
 use crate::outputs::pad::{Pad, PadFrame};
 use crate::sensor::{Frame, Surface, magic_mouse};
 use crate::time::Mono;
 use palmrest_protocol::{ActiveTouch, LockState, Over, ToHost};
-use strokes::Route;
 
 /// Touches this soon after a click are ignored.
 const CLICK_GUARD: Ms = Ms(200);
@@ -50,28 +48,10 @@ pub struct Tracker {
     one: OneSwipe,
     swipe: SwipeFire,
     tap: TapG,
-    carry: Carry,
     pad: Pad,
     claimed: Over,
     session: LockState,
     touching: ActiveTouch,
-}
-
-/// A tracker and the outputs the stages that made it caused.
-type Staged = (Tracker, Vec<Out>);
-
-/// One stage after another: the next runs on the tracker the last came to, and the outputs stay
-/// in order.
-trait Stages {
-    fn then(self, next: impl FnOnce(Tracker) -> Staged) -> Staged;
-}
-
-impl Stages for Staged {
-    fn then(self, next: impl FnOnce(Tracker) -> Staged) -> Staged {
-        let (tracker, outs) = self;
-        let (tracker, more) = next(tracker);
-        (tracker, outs.into_iter().chain(more).collect())
-    }
 }
 
 impl Tracker {
@@ -98,7 +78,6 @@ impl Tracker {
             one: OneSwipe::Idle,
             swipe: SwipeFire::default(),
             tap: TapG::Idle,
-            carry: Carry::default(),
             pad: Pad::Up,
             claimed,
             session,
@@ -111,16 +90,6 @@ impl Tracker {
         Self { surface, ..self }
     }
 
-    /// The surface the frames come from.
-    pub fn surface(&self) -> &Surface {
-        &self.surface
-    }
-
-    /// The configuration in force.
-    pub fn config(&self) -> &Config {
-        &self.cfg
-    }
-
     /// Applies a reloaded configuration; running gestures continue under it.
     pub fn with_config(self, cfg: Config) -> Self {
         Self { cfg, ..self }
@@ -131,39 +100,27 @@ impl Tracker {
         self.stroke.intent()
     }
 
-    /// The lock screen's state, as the shell last said it. While the session is locked no
-    /// gesture runs a key or a desktop action and no Spaces swipe starts; scrolling and the
-    /// socket stream go on.
-    pub fn with_session_lock(self, session: LockState) -> Self {
-        Self { session, ..self }
-    }
-
-    /// Who holds the pointer.
-    pub fn claimed(&self) -> Over {
-        self.claimed
-    }
-
     /// When `tick` next has work to do, if ever: a delayed touchpad lift.
     pub fn deadline(&self) -> Option<Mono> {
         self.pad.deadline()
+    }
+
+    /// The lock screen's state, as the shell last said it. While the session is locked no
+    /// gesture runs a key or a desktop action and no Spaces swipe starts; a swipe that was
+    /// running lifts at once. Scrolling and the socket stream go on.
+    pub fn with_session_lock(self, session: LockState) -> (Self, Vec<Out>) {
+        Self { session, ..self }.enforce()
     }
 
     /// A host claimed or released the pointer (the aggregate over subscribers). A scroll on the
     /// virtual touchpad lifts at once when a host takes over, so nothing is left pressed under
     /// our own surfaces. A Spaces swipe is the compositor's and goes on.
     pub fn claim(self, over: Over) -> (Self, Vec<Out>) {
-        let (pad, frames) = match over {
-            Over::Ours => self.pad.lift_scroll(),
-            Over::NotOurs => (self.pad, vec![]),
-        };
-        (
-            Self {
-                claimed: over,
-                pad,
-                ..self
-            },
-            pad_outs(frames),
-        )
+        Self {
+            claimed: over,
+            ..self
+        }
+        .enforce()
     }
 
     /// The virtual devices were lost and rebuilt: nothing is down on them any more, so the pad
@@ -185,17 +142,13 @@ impl Tracker {
     /// with only what outlives the mouse.
     pub fn disconnect(self, now: Mono) -> (Self, Vec<Out>) {
         let (stroke, events) = self.stroke.disconnect();
-        let (s, cancelled) = Self { stroke, ..self }.apply(&events, now);
+        let (s, mut outs) = Self { stroke, ..self }.apply(&events, now);
         let (_, frames) = s.pad.lift_now();
-        let up = (s.touching == ActiveTouch::Down).then_some(Out::Host(ToHost::Touches {
-            active: ActiveTouch::Up,
-        }));
-        let outs = cancelled
-            .into_iter()
-            .chain(pad_outs(frames))
-            .chain(up)
-            .chain([Out::Host(ToHost::DeviceGone)])
-            .collect();
+        outs.extend(pad_outs(frames));
+        if s.touching == ActiveTouch::Down {
+            outs.push(touches(ActiveTouch::Up));
+        }
+        outs.push(Out::Host(ToHost::DeviceGone));
         (Self::idle(s.cfg, s.surface, s.claimed, s.session), outs)
     }
 
@@ -214,109 +167,52 @@ impl Tracker {
             .contacts
             .step(&r.contacts, now, &Bands::resolve(&self.surface));
         let hold = click.hold(now);
-        let cancel = press || seen.palm_turned;
         let samples = seen.samples;
+        let edge = touch_edge(self.touching, active(&samples));
         let s = Self {
             click,
             motion,
             contacts,
+            touching: active(&samples),
             ..self
         };
 
-        s.tick(now)
-            .then(Self::release_swipe_while_locked)
-            .then(|s| s.touches(active(&samples), ActiveTouch::Down))
-            .then(|s| s.cancel_if(cancel, now))
-            .then(|s| s.recognise(&samples, now, &params, hold))
-            .then(|s| s.gestures(&samples, now, hold))
-            .then(|s| s.touches(active(&samples), ActiveTouch::Up))
-    }
-
-    /// `Touches{Down}` before this report's stroke phases, `Touches{Up}` after them: `next` is
-    /// this report's state, `which` the edge this call may emit.
-    fn touches(self, next: ActiveTouch, which: ActiveTouch) -> Staged {
-        if next == which && next != self.touching {
-            (
-                Self {
-                    touching: next,
-                    ..self
-                },
-                vec![Out::Host(ToHost::Touches { active: next })],
-            )
+        // `tick` runs first, so a lift that has come due is written before this report's motion.
+        let (s, mut outs) = s.tick(now);
+        outs.extend(edge_out(edge, ActiveTouch::Down));
+        let (s, cancelled) = if press || seen.palm_turned {
+            s.cancel(now)
         } else {
-            (self, vec![])
-        }
+            (s, vec![])
+        };
+        outs.extend(cancelled);
+        let (s, recognised) = s.recognise(&samples, now, &params, hold);
+        outs.extend(recognised);
+        let (s, gestured) = s.gestures(&samples, now, hold);
+        outs.extend(gestured);
+        outs.extend(edge_out(edge, ActiveTouch::Up));
+        (s, outs)
     }
 
-    fn cancel_if(self, cancel: bool, now: Mono) -> Staged {
-        if !cancel {
-            return (self, vec![]);
-        }
+    /// Cancels the running stroke (a click or a palm); the fingers stay followed.
+    fn cancel(self, now: Mono) -> (Self, Vec<Out>) {
         let (stroke, events) = self.stroke.cancel();
         Self { stroke, ..self }.apply(&events, now)
     }
 
-    fn recognise(self, samples: &[Sample], now: Mono, params: &Params, hold: Hold) -> Staged {
+    fn recognise(
+        self,
+        samples: &[Sample],
+        now: Mono,
+        params: &Params,
+        hold: Hold,
+    ) -> (Self, Vec<Out>) {
         let (stroke, events) = self.stroke.step(samples, now, params, hold);
         Self { stroke, ..self }.apply(&events, now)
     }
 
-    /// What the stroke's phases cause: the shell's scroll messages, the touchpad's fingers and,
-    /// for a remapped two-finger swipe, the action it fires.
-    fn apply(self, events: &[StrokeEvent], now: Mono) -> Staged {
-        (self, vec![])
-            .then(|s| s.route(events, now))
-            .then(|s| s.fire(events, now))
-    }
-
-    fn route(self, events: &[StrokeEvent], now: Mono) -> Staged {
-        let routing = Route {
-            claimed: self.claimed,
-            session: self.session,
-            live_swipe: self
-                .cfg
-                .gestures
-                .gesture_action_map
-                .two_finger_swipe_is_live(),
-            speed: self.cfg.scroll.speed,
-        };
-        let (pad, carry, outs) =
-            events
-                .iter()
-                .fold((self.pad, self.carry, vec![]), |(pad, carry, outs), e| {
-                    let (pad, drawn) = strokes::pad_step(pad, e, &routing, now);
-                    let (carry, scroll) = strokes::host_scroll(carry, e, routing.speed, now);
-                    let outs = outs.into_iter().chain(scroll).chain(drawn).collect();
-                    (pad, carry, outs)
-                });
-        (Self { pad, carry, ..self }, outs)
-    }
-
-    /// The action of a remapped two-finger swipe, once per threshold of travel.
-    fn fire(self, events: &[StrokeEvent], now: Mono) -> Staged {
-        let map = &self.cfg.gestures.gesture_action_map;
-        if map.two_finger_swipe_is_live() {
-            return (self, vec![]);
-        }
-        let (swipe, fired) = events
-            .iter()
-            .fold((self.swipe, vec![]), |(swipe, fired), e| {
-                let (swipe, dir) = swipe.step(e, now);
-                (swipe, fired.into_iter().chain(dir).collect::<Vec<_>>())
-            });
-        let outs = fired
-            .into_iter()
-            .flat_map(|dir| {
-                let action = map.action_for(Gesture::two_finger_swipe(dir));
-                action_outs(action, Source::Other, self.claimed)
-            })
-            .collect();
-        let session = self.session;
-        (Self { swipe, ..self }, while_unlocked(session, outs))
-    }
-
     /// G4 and the double-taps, after the recogniser has seen the report.
-    fn gestures(self, samples: &[Sample], now: Mono, hold: Hold) -> Staged {
+    fn gestures(self, samples: &[Sample], now: Mono, hold: Hold) -> (Self, Vec<Out>) {
         let map = &self.cfg.gestures.gesture_action_map;
         let (one, g4) = self.one.step(samples, self.stroke.intent(), now, hold);
         let (tap, kind) = self.tap.step(samples, now, hold);
@@ -334,17 +230,6 @@ impl Tracker {
         let session = self.session;
         (Self { one, tap, ..self }, while_unlocked(session, outs))
     }
-
-    /// A locked session has no Spaces swipe: one that was running when the screen locked lifts.
-    fn release_swipe_while_locked(self) -> Staged {
-        match self.session {
-            LockState::Unlocked => (self, vec![]),
-            LockState::Locked => {
-                let (pad, frames) = self.pad.lift_swipe();
-                (Self { pad, ..self }, pad_outs(frames))
-            }
-        }
-    }
 }
 
 fn pad_outs(frames: Vec<PadFrame>) -> Vec<Out> {
@@ -358,4 +243,19 @@ fn active(samples: &[Sample]) -> ActiveTouch {
     } else {
         ActiveTouch::Down
     }
+}
+
+/// The edge a report makes: Down when the first contact lands, Up when the last one lifts.
+fn touch_edge(was: ActiveTouch, now: ActiveTouch) -> Option<ActiveTouch> {
+    (was != now).then_some(now)
+}
+
+/// The `Touches` message for `edge` if it is the `which` edge: Down goes out before the report's
+/// stroke phases, Up after them.
+fn edge_out(edge: Option<ActiveTouch>, which: ActiveTouch) -> Option<Out> {
+    edge.filter(|e| *e == which).map(touches)
+}
+
+fn touches(active: ActiveTouch) -> Out {
+    Out::Host(ToHost::Touches { active })
 }

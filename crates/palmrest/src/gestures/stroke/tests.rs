@@ -35,7 +35,18 @@ fn run(rec: Recogniser, frames: &[(u64, Vec<Sample>)]) -> (Recogniser, Vec<Event
 }
 
 fn phases(events: &[Event]) -> Vec<Phase> {
-    events.iter().map(|e| e.phase).collect()
+    events.iter().map(Event::phase).collect()
+}
+
+/// The motion of every Changed, in order.
+fn changes(events: &[Event]) -> Vec<Motion> {
+    events
+        .iter()
+        .filter_map(|e| match e.moment {
+            Moment::Changed { motion, .. } => Some(motion),
+            _ => None,
+        })
+        .collect()
 }
 
 #[test]
@@ -45,17 +56,22 @@ fn locking_drops_the_pending_motion_and_hands_it_on_as_the_lead() {
         .collect();
     let (rec, events) = run(Recogniser::default(), &frames);
     assert_eq!(rec.intent(), Some(Intent::Scroll(Axis::Y)));
-    // Frames 1..=4 accumulate 40 and lock; frames 5..=9 scroll 10 each.
-    assert_eq!(
-        phases(&events),
-        [vec![Phase::MayBegin, Phase::Began], vec![Phase::Changed; 5]].concat()
-    );
-    assert_eq!(events[1].motion.y, lattice::mm(40, Axis::Y), "the lead");
-    for e in &events[2..] {
-        assert_eq!(e.motion.y, lattice::mm(10, Axis::Y));
-        assert_eq!(e.motion.x, Mm(0.0), "a scroll follows its axis only");
-        assert_eq!(e.intent, Some(Intent::Scroll(Axis::Y)));
+    assert_eq!(phases(&events)[..2], [Phase::MayBegin, Phase::Began]);
+    assert!(phases(&events)[2..].iter().all(|p| *p == Phase::Changed));
+    let Moment::Began { intent, lead } = events[1].moment else {
+        panic!("not a Began: {:?}", events[1]);
+    };
+    assert_eq!(intent, Intent::Scroll(Axis::Y));
+    assert!(lead.y.0 > 0.0, "the lead says which way the stroke starts");
+    let moved = changes(&events);
+    assert!(!moved.is_empty());
+    for m in &moved {
+        assert!(m.y.0 > 0.0);
+        assert_eq!(m.x, Mm(0.0), "a scroll follows its axis only");
     }
+    // Nothing is lost and nothing counted twice: the lead and the changes are the whole drag.
+    let total = lead.y.0 + moved.iter().map(|m| m.y.0).sum::<f64>();
+    assert!((total - lattice::mm(90, Axis::Y).0).abs() < 1e-9, "{total}");
 }
 
 #[test]
@@ -63,15 +79,18 @@ fn two_fingers_sideways_are_a_space_swipe_and_two_fingers_up_and_down_scroll() {
     let sideways: Vec<_> = (0..12).map(|i| (i * 8, two(i as i32 * 10, 0))).collect();
     let (rec, events) = run(Recogniser::default(), &sideways);
     assert_eq!(rec.intent(), Some(Intent::SpaceSwipe));
-    let began = events.iter().find(|e| e.phase == Phase::Began).unwrap();
-    assert_eq!((began.intent, began.fingers), (Some(Intent::SpaceSwipe), 2));
-    assert!(began.motion.x.0 > 0.0, "the lead says which way it starts");
-    let changed: Vec<_> = events
+    let began = events
         .iter()
-        .filter(|e| e.phase == Phase::Changed)
-        .collect();
-    assert!(!changed.is_empty());
-    assert!(changed.iter().all(|e| e.motion.x.0 > 0.0));
+        .find(|e| e.phase() == Phase::Began)
+        .expect("a Began");
+    let Moment::Began { intent, lead } = began.moment else {
+        panic!("not a Began: {began:?}");
+    };
+    assert_eq!((intent, began.fingers), (Intent::SpaceSwipe, 2));
+    assert!(lead.x.0 > 0.0, "the lead says which way it starts");
+    let moved = changes(&events);
+    assert!(!moved.is_empty());
+    assert!(moved.iter().all(|m| m.x.0 > 0.0));
 
     let down: Vec<_> = (0..12).map(|i| (i * 8, two(0, i as i32 * 10))).collect();
     let (rec, _) = run(Recogniser::default(), &down);
@@ -104,6 +123,36 @@ fn a_pause_unlocks_on_the_next_delta() {
 }
 
 #[test]
+fn a_pause_does_not_end_a_swipe() {
+    let across = |i: i32| two(i * 10, 0);
+    let before: Vec<_> = (0..12).map(|i| (i as u64 * 8, across(i))).collect();
+    let after: Vec<_> = (12..24)
+        .map(|i| (400 + i as u64 * 8, across(i)))
+        .chain([(1000, vec![])])
+        .collect();
+    let (rec, first) = run(Recogniser::default(), &before);
+    assert_eq!(rec.intent(), Some(Intent::SpaceSwipe));
+    let (rec, rest) = run(rec, &after);
+    let all = [first, rest].concat();
+    let count = |p| phases(&all).iter().filter(|q| **q == p).count();
+    assert_eq!(
+        (
+            count(Phase::MayBegin),
+            count(Phase::Began),
+            count(Phase::Ended)
+        ),
+        (1, 1, 1),
+        "one swipe, closed by the lift: {:?}",
+        phases(&all)
+    );
+    assert!(
+        changes(&all).len() > 12,
+        "the motion after the pause is the same swipe's"
+    );
+    assert_eq!(rec.intent(), None);
+}
+
+#[test]
 fn zero_delta_does_not_refresh_motion_time() {
     let frames = vec![
         (0, one(0, 0)),
@@ -122,7 +171,7 @@ fn a_held_click_accumulates_nothing() {
     assert!(events.is_empty());
     assert_eq!(rec.intent(), None);
     let (_, events) = rec.step(&one(0, 110), Mono::from_millis(16), &PARAMS, Hold::Open);
-    assert!(events.is_empty(), "only the 10 units after the hold count");
+    assert!(events.is_empty(), "only the motion after the hold counts");
 }
 
 #[test]
@@ -142,10 +191,13 @@ fn every_may_begin_is_closed_exactly_once() {
         .chain([(400, vec![])])
         .collect();
     let (_, events) = run(Recogniser::default(), &strokes);
-    let opens = events.iter().filter(|e| e.phase == Phase::MayBegin).count();
+    let opens = events
+        .iter()
+        .filter(|e| e.phase() == Phase::MayBegin)
+        .count();
     let closes = events
         .iter()
-        .filter(|e| matches!(e.phase, Phase::Ended | Phase::Cancelled))
+        .filter(|e| matches!(e.phase(), Phase::Ended | Phase::Cancelled))
         .count();
     assert_eq!((opens, closes), (2, 2));
 }
@@ -158,6 +210,13 @@ fn a_cancel_keeps_the_fingers_and_the_next_decision_opens_a_new_gesture() {
     let (rec, cancelled) = rec.cancel();
     assert_eq!(phases(&cancelled), [Phase::Cancelled]);
     assert_eq!(cancelled[0].gesture, first);
+    assert_eq!(
+        cancelled[0].moment,
+        Moment::Cancelled {
+            intent: Some(Intent::Scroll(Axis::Y))
+        },
+        "a cancel says what it cancelled"
+    );
     assert_eq!(rec.intent(), None);
     let (_, after) = rec.cancel();
     assert!(after.is_empty(), "a quiet stroke has nothing to cancel");

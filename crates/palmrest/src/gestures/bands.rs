@@ -6,7 +6,8 @@ use crate::sensor::lattice::{GridExtent, units};
 use crate::touch::Point;
 use palmrest_protocol::Axis;
 
-/// The width of the left band, from the surface's left edge.
+/// The width of the left band, from the surface's left edge: 200 grid units. Equal to
+/// `swipe::THRESHOLD` in value only; a band's width and a swipe's travel are separate facts.
 const SIDE_BAND_LEFT: Um = Um(7692);
 /// The width of the right band, from the surface's right edge.
 const SIDE_BAND_RIGHT: Um = Um(7615);

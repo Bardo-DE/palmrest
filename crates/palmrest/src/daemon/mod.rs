@@ -63,7 +63,9 @@ pub fn run(env: &Env, origin: Origin) -> Result<(), Error> {
         devices: Devices::new(factory, &loaded.config, now),
         // Locked until the shell says otherwise: a gesture runs no key or desktop action on a
         // session whose state nobody has reported.
-        tracker: Tracker::new(loaded.config).with_session_lock(LockState::Locked),
+        tracker: Tracker::new(loaded.config)
+            .with_session_lock(LockState::Locked)
+            .0,
         system: loaded.text,
         user: None,
     };

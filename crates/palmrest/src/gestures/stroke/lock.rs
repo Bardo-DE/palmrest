@@ -3,8 +3,9 @@
 //!
 //! Settled behaviour (11.3.9): accumulate centroid deltas until one axis passes the threshold
 //! and dominates by the ratio; lock it and drop the accumulated motion so locking never jumps
-//! (the dropped motion is handed on as the lead); a delta arriving at least the timeout after
-//! the previous motion unlocks.
+//! (the dropped motion is handed on as the lead). A scroll's lock times out: a delta arriving at
+//! least the timeout after its previous motion unlocks. A Spaces swipe's does not, because a
+//! pause in a swipe is still the same swipe; it ends only when its contact set changes or lifts.
 
 use super::follow::Follow;
 use super::rule::{Params, intent_of};
@@ -20,7 +21,7 @@ pub enum Signal {
     Reset,
     /// A new contact set landed (or the set changed).
     Start { fingers: u8 },
-    /// The lock timed out on this report's delta.
+    /// A scroll's lock timed out on this report's delta.
     Unlocked,
     /// The intent was decided; `lead` is the motion accumulated before it.
     Locked { intent: Intent, lead: Motion },
@@ -121,7 +122,7 @@ impl Lock {
             .is_some_and(|t| now.float_since(t) >= p.timeout.as_secs_f64());
         match self.decision {
             Decision::Free { .. } => self.accumulate(delta, now, p, vec![]),
-            Decision::Locked(_) if timed_out => {
+            Decision::Locked(Intent::Scroll(_)) if timed_out => {
                 self.cancel()
                     .accumulate(delta, now, p, vec![Signal::Unlocked])
             }

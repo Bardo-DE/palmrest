@@ -22,6 +22,7 @@ use crate::time::Mono;
 use life::Life;
 use lock::Lock;
 use palmrest_protocol::{Axis, GestureId, Phase};
+pub(crate) use rule::{LOCK_THRESHOLD_X, LOCK_THRESHOLD_Y};
 pub use rule::{Params, Threshold};
 
 /// What a decided stroke is for.
@@ -59,32 +60,45 @@ impl Motion {
     }
 }
 
-/// One phase of a stroke.
+/// One phase of one gesture.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Event {
     pub gesture: GestureId,
-    pub phase: Phase,
     pub fingers: u8,
-    /// What the stroke is for: known from Began on, and carried by its Changed, Ended and
-    /// Cancelled; none before the decision.
-    pub intent: Option<Intent>,
-    /// Began: the motion that accumulated before the decision and was dropped from the stroke,
-    /// whose direction says which way the stroke starts. Changed: this report's motion on the
-    /// axes the intent follows. Zero otherwise.
-    pub motion: Motion,
-    /// Changed: seconds since the stroke's previous motion.
-    pub dt_s: f64,
+    pub moment: Moment,
+}
+
+/// What a gesture's phase carries: an intent exists from Began on, so only the phases that can
+/// come before the decision (Ended, Cancelled) hold it as an option.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Moment {
+    /// MayBegin: a set of one or two fingers landed.
+    Announced,
+    /// The intent was decided. `lead` is the motion that accumulated before the decision and
+    /// was dropped from the stroke; its direction says which way the stroke starts.
+    Began { intent: Intent, lead: Motion },
+    /// The stroke moved: `motion` on the axes the intent follows, `dt_s` seconds after its
+    /// previous motion.
+    Changed {
+        intent: Intent,
+        motion: Motion,
+        dt_s: f64,
+    },
+    /// The contact set ended or changed, or a scroll's lock timed out.
+    Ended { intent: Option<Intent> },
+    /// A click or a palm cancelled the gesture.
+    Cancelled { intent: Option<Intent> },
 }
 
 impl Event {
-    fn bare(gesture: GestureId, fingers: u8, phase: Phase, intent: Option<Intent>) -> Self {
-        Self {
-            gesture,
-            phase,
-            fingers,
-            intent,
-            motion: Motion::default(),
-            dt_s: 0.0,
+    /// The phase the shell stream names this event by.
+    pub fn phase(&self) -> Phase {
+        match self.moment {
+            Moment::Announced => Phase::MayBegin,
+            Moment::Began { .. } => Phase::Began,
+            Moment::Changed { .. } => Phase::Changed,
+            Moment::Ended { .. } => Phase::Ended,
+            Moment::Cancelled { .. } => Phase::Cancelled,
         }
     }
 }

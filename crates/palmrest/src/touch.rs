@@ -39,6 +39,15 @@ impl Point {
         Point::new(wrap_delta(self.x, from.x), wrap_delta(self.y, from.y))
     }
 
+    /// The mean of `points`, each axis truncated toward zero; the origin when there are none.
+    pub fn mean(points: impl IntoIterator<Item = Point>) -> Point {
+        let (n, sx, sy) = points
+            .into_iter()
+            .fold((0, 0, 0), |(n, sx, sy), p| (n + 1, sx + p.x, sy + p.y));
+        let n = n.max(1);
+        Point::new(sx / n, sy / n)
+    }
+
     /// Euclidean length, for "moved less than N units" rules.
     pub fn length(self) -> f64 {
         f64::from(self.x).hypot(f64::from(self.y))

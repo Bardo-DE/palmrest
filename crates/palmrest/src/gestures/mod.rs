@@ -14,6 +14,6 @@ pub use click::{ClickGuard, Hold};
 pub use contacts::{Contact, Contacts, Sample, Seen};
 pub use motion::MotionWindow;
 pub use one_swipe::OneSwipe;
-pub use stroke::{Event as StrokeEvent, Intent, Motion, Params, Recogniser};
+pub use stroke::{Event as StrokeEvent, Intent, Moment, Motion, Params, Recogniser};
 pub use swipe::{FingerDirection, SwipeFire};
 pub use tap::TapG;

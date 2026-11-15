@@ -9,11 +9,17 @@
 //!   compositor reads as a four-finger swipe. It never lands again mid-swipe: at the edge it
 //!   stops.
 //!
-//! Contacts land at the decision (never at MayBegin, so a resting finger makes nothing), and are
-//! held down until `MIN_DOWN` so libinput's tap timeout has passed. `layout` has the geometry
-//! and the libinput zones it keeps clear of.
+//! Contacts land at the decision (never at MayBegin, so a resting finger makes nothing). A
+//! scroll's are held down until `MIN_DOWN` so libinput's tap timeout has passed; a swipe's lift
+//! at once, since libinput only taps with up to three fingers and a held swipe would add
+//! stationary time to a flick. A cancelled swipe returns to where it landed before it lifts, so
+//! the compositor sees no travel and stays on its Space. `policy` says what may be down at all;
+//! `layout` has the geometry and the libinput zones it keeps clear of.
 
 mod layout;
+mod policy;
+
+pub use policy::Policy;
 
 use crate::config::Ms;
 use crate::gestures::{Intent, Motion};
@@ -21,7 +27,7 @@ use crate::sensor::units::MmPoint;
 use crate::time::Mono;
 use serde::{Deserialize, Serialize};
 
-/// How long the fingers stay down so apps see a stroke.
+/// How long a scroll's fingers stay down so apps see a stroke.
 const MIN_DOWN: Ms = Ms(200);
 
 /// Pad units per millimetre (resolution of ABS_MT_POSITION_*).
@@ -59,11 +65,12 @@ pub enum PadFrame {
     Lift,
 }
 
-/// What is down: the intent it landed for, when, and where its centre is.
+/// What is down: the intent it landed for, when, where it landed and where its centre is now.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Down {
     intent: Intent,
     landed: Mono,
+    origin: MmPoint,
     at: MmPoint,
 }
 
@@ -73,7 +80,7 @@ pub enum Pad {
     #[default]
     Up,
     Down(Down),
-    /// The stroke ended but the lift waits until `until`.
+    /// A scroll ended but the lift waits until `until`.
     Lifting {
         intent: Intent,
         until: Mono,
@@ -96,6 +103,7 @@ impl Pad {
             Pad::Down(Down {
                 intent,
                 landed: now,
+                origin: at,
                 at,
             }),
             lifted.into_iter().chain([land]).collect(),
@@ -120,26 +128,42 @@ impl Pad {
         }
     }
 
-    /// The stroke Ended or was Cancelled: lift now, or at `landed + MIN_DOWN` if the stroke is
-    /// younger than that. A stroke older than that has outlived the tap timeout whatever it
-    /// moved.
+    /// The stroke Ended. A swipe lifts now. A scroll lifts now, or at `landed + MIN_DOWN` if it
+    /// is younger than that: one older has outlived the tap timeout whatever it moved.
     pub fn end(self, now: Mono) -> (Self, Vec<PadFrame>) {
         match self {
             Pad::Down(down) => {
                 let until = down.landed.after(MIN_DOWN.duration());
-                if now < until {
-                    (
+                match down.intent {
+                    Intent::Scroll(_) if now < until => (
                         Pad::Lifting {
                             intent: down.intent,
                             until,
                         },
                         vec![],
-                    )
-                } else {
-                    (Pad::Up, vec![PadFrame::Lift])
+                    ),
+                    _ => (Pad::Up, vec![PadFrame::Lift]),
                 }
             }
             other => (other, vec![]),
+        }
+    }
+
+    /// The stroke was Cancelled (a click or a palm). A scroll ends as it would have. A swipe
+    /// first moves the row back to where it landed, in one frame, and then lifts, so the
+    /// compositor reads no travel and returns to the Space it was on.
+    pub fn cancel(self, now: Mono) -> (Self, Vec<PadFrame>) {
+        match self {
+            Pad::Down(Down {
+                intent: Intent::SpaceSwipe,
+                origin,
+                at,
+                ..
+            }) => {
+                let back = (at != origin).then(|| PadFrame::Move { at: point(origin) });
+                (Pad::Up, back.into_iter().chain([PadFrame::Lift]).collect())
+            }
+            other => other.end(now),
         }
     }
 
@@ -159,19 +183,11 @@ impl Pad {
         }
     }
 
-    /// Lifts a scroll's contacts immediately and leaves a swipe alone: a host took the pointer,
-    /// and the swipe is the compositor's, whoever holds the pointer.
-    pub fn lift_scroll(self) -> (Self, Vec<PadFrame>) {
+    /// Lifts at once whatever the policy no longer allows: a host took the pointer from a
+    /// scroll, or the session locked on a swipe.
+    pub fn enforce(self, policy: Policy) -> (Self, Vec<PadFrame>) {
         match self.intent() {
-            Some(Intent::Scroll(_)) => self.lift_now(),
-            _ => (self, vec![]),
-        }
-    }
-
-    /// Lifts a swipe's contacts immediately and leaves a scroll alone: the session locked.
-    pub fn lift_swipe(self) -> (Self, Vec<PadFrame>) {
-        match self.intent() {
-            Some(Intent::SpaceSwipe) => self.lift_now(),
+            Some(intent) if !policy.allows(intent) => self.lift_now(),
             _ => (self, vec![]),
         }
     }

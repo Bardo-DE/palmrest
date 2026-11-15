@@ -54,7 +54,9 @@ fn run_remapped(name: &str) -> Vec<Out> {
 /// Replays the remapped settings with the session locked from the start.
 fn run_locked(name: &str) -> Vec<Out> {
     run_from(
-        Tracker::new(remapped()).with_session_lock(LockState::Locked),
+        Tracker::new(remapped())
+            .with_session_lock(LockState::Locked)
+            .0,
         name,
     )
 }

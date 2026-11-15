@@ -1,11 +1,12 @@
 //! G6/G7: one- and two-finger double-taps (12.4 "Tap").
 //!
 //! A tap is a touchdown whose peak contact count is 1 or 2, that lifts completely within
-//! `MAX`, in which no contact moves out of the `MAX_MOVE` ellipse, with no click. A double-tap
+//! `MAX`, in which no contact reaches the stroke recogniser's lock threshold, with no click. A double-tap
 //! is a second tap of the same count landing within `GAP` of the first lifting and inside the
 //! `CENTROID_MAX` ellipse around where it was. Taps never scroll: their motion stays under the
 //! lock threshold.
 
+use super::stroke::{LOCK_THRESHOLD_X, LOCK_THRESHOLD_Y};
 use super::{Hold, Sample};
 use crate::config::{Ms, Um};
 use crate::sensor::lattice::Ellipse;
@@ -17,8 +18,6 @@ use palmrest_protocol::TapKind;
 const MAX: Ms = Ms(200);
 /// The longest pause between a double-tap's taps.
 const GAP: Ms = Ms(350);
-/// No contact of a tap moves this far from where it landed (an ellipse: sideways, lengthways).
-const MAX_MOVE: (Um, Um) = (Um(1538), Um(571));
 /// The second tap lands this close to the first (an ellipse: sideways, lengthways).
 const CENTROID_MAX: (Um, Um) = (Um(11538), Um(4286));
 
@@ -145,7 +144,9 @@ impl Touchdown {
             self.centroid = centroid(contacts);
         }
         self.count = n;
-        let max_move = Ellipse::of(MAX_MOVE.0, MAX_MOVE.1);
+        // A tap stays inside the stroke recogniser's lock threshold, so it never scrolls. The
+        // threshold's P5 multiplier (a moving mouse) is not applied: a tap needs a still finger.
+        let max_move = Ellipse::of(LOCK_THRESHOLD_X, LOCK_THRESHOLD_Y);
         let moved = contacts.iter().any(|c| {
             let o = self
                 .origins
@@ -167,11 +168,7 @@ impl Touchdown {
 }
 
 fn centroid(contacts: &[Sample]) -> Point {
-    let n = contacts.len().max(1) as i32;
-    let (sx, sy) = contacts
-        .iter()
-        .fold((0, 0), |(x, y), c| (x + c.at.x, y + c.at.y));
-    Point::new(sx / n, sy / n)
+    Point::mean(contacts.iter().map(|c| c.at))
 }
 
 #[cfg(test)]

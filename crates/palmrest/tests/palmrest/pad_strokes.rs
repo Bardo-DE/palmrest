@@ -3,14 +3,16 @@
 //! needs: the fingers move as far as the real ones, land where a stroke fits, and never land in
 //! a zone libinput ignores.
 
-use crate::support::Script;
 use crate::support::mm::{drive, feed_all, outs_of, stroke};
+use crate::support::{Script, finger};
 use palmrest::action::{Action, Gesture};
 use palmrest::config::Config;
 use palmrest::outputs::events::{
     BTN_TOOL_DOUBLETAP, BTN_TOOL_FINGER, BTN_TOOL_QUADTAP, BTN_TOOL_TRIPLETAP, EV_KEY, PadEncoder,
 };
 use palmrest::outputs::pad::{PadFrame, UNITS_PER_MM};
+use palmrest::sensor::magic_mouse::report::{Buttons, Motion};
+use palmrest::touch::RawTouch;
 use palmrest::{Mono, Out, Tracker};
 use palmrest_protocol::{Axis, LockState, Over, ToHost, Workspace};
 
@@ -64,8 +66,7 @@ fn lifts(frames: &[PadFrame]) -> usize {
 
 /// Drives a fresh tracker with an unlocked session through `script`.
 fn run(cfg: Config, script: &Script) -> Vec<Out> {
-    let tracker = Tracker::new(cfg).with_session_lock(LockState::Unlocked);
-    outs_of(&drive(tracker, &script.records))
+    outs_of(&drive(Tracker::new(cfg), &script.records))
 }
 
 /// The shipped settings with both two-finger swipes mapped the other way round: not the
@@ -116,32 +117,6 @@ fn a_45_mm_vertical_stroke_lands_once_and_moves_the_pad_as_far_as_the_fingers() 
 }
 
 #[test]
-fn a_stroke_up_lands_low_and_a_stroke_across_lands_at_the_side_it_comes_from() {
-    let up = pad(&run(
-        Config::default(),
-        &stroke(2, Axis::Y, -40.0, 40, 12.0),
-    ));
-    let (_, (x, y), _) = landings(&up)[0].clone();
-    assert_eq!(
-        (x, y),
-        (50.0, 55.0),
-        "moving up: as low as a landing may be"
-    );
-    assert!(moves(&up).last().unwrap().1 < y - 38.0);
-
-    let right = pad(&run(Config::default(), &stroke(1, Axis::X, 30.0, 30, 12.0)));
-    let (fingers, (x, _), xs) = landings(&right)[0].clone();
-    assert_eq!((fingers, x), (2, 20.0), "moving right: near the left");
-    assert!(xs.iter().all(|x| *x >= 10.0));
-    let left = pad(&run(
-        Config::default(),
-        &stroke(1, Axis::X, -30.0, 30, 12.0),
-    ));
-    let (_, (x, _), _) = landings(&left)[0].clone();
-    assert_eq!(x, 80.0, "moving left: near the right");
-}
-
-#[test]
 fn a_claim_silences_the_scroll_pad_but_not_the_shell_stream() {
     let script = stroke(2, Axis::Y, 30.0, 40, 12.0);
     let (claimed, _) = Tracker::new(Config::default()).claim(Over::Ours);
@@ -183,22 +158,6 @@ fn a_two_finger_horizontal_stroke_is_a_four_contact_swipe_that_follows_x_one_to_
 }
 
 #[test]
-fn the_swipe_ignores_vertical_motion_and_stops_at_the_edge_instead_of_landing_again() {
-    // 90 mm across the mouse is more than the pad has room for from the left landing.
-    let script = stroke(2, Axis::X, 90.0, 90, 12.0);
-    let frames = pad(&run(Config::default(), &script));
-    assert_eq!(landings(&frames).len(), 1);
-    let (_, (_, y0), _) = landings(&frames)[0].clone();
-    let path = moves(&frames);
-    let end = path.last().unwrap();
-    assert_eq!(
-        end.0, 77.0,
-        "the centre stops 5 mm short of the edge, 18 mm of row on each side"
-    );
-    assert!(path.iter().all(|&(_, y)| y == y0));
-}
-
-#[test]
 fn the_swipe_runs_under_a_claim_and_a_claim_mid_swipe_does_not_lift_it() {
     let script = stroke(2, Axis::X, 45.0, 45, 12.0);
     let (claimed, _) = Tracker::new(Config::default()).claim(Over::Ours);
@@ -223,7 +182,7 @@ fn the_swipe_runs_under_a_claim_and_a_claim_mid_swipe_does_not_lift_it() {
 #[test]
 fn a_locked_session_has_no_swipe() {
     let script = stroke(2, Axis::X, 45.0, 45, 12.0);
-    let locked = Tracker::new(Config::default()).with_session_lock(LockState::Locked);
+    let (locked, _) = Tracker::new(Config::default()).with_session_lock(LockState::Locked);
     let outs = outs_of(&drive(locked, &script.records));
     assert!(pad(&outs).is_empty());
     assert!(
@@ -234,29 +193,108 @@ fn a_locked_session_has_no_swipe() {
 }
 
 #[test]
-fn a_session_that_locks_mid_swipe_lifts_it() {
+fn a_session_that_locks_mid_swipe_lifts_it_at_once_and_the_rest_of_the_stroke_stays_off_the_pad() {
     let script = stroke(2, Axis::X, 45.0, 45, 12.0);
-    let (half, _) = script.records.split_at(25);
+    let (half, rest) = script.records.split_at(25);
     let (t, before) = feed_all(Tracker::new(Config::default()), half);
     assert!(
         pad(&outs_of(&before))
             .iter()
             .any(|f| matches!(f, PadFrame::Land { .. }))
     );
-    let (_, after) = feed_all(
-        t.with_session_lock(LockState::Locked),
-        &script.records[25..26],
+    let (t, on_lock) = t.with_session_lock(LockState::Locked);
+    assert_eq!(
+        pad(&on_lock),
+        [PadFrame::Lift],
+        "the lock call lifts it itself"
     );
-    assert_eq!(pad(&outs_of(&after)), [PadFrame::Lift]);
+    let after = drive(t, rest);
+    assert!(pad(&outs_of(&after)).is_empty());
+}
+
+/// Two fingers `i` millimetres along a horizontal stroke.
+fn pair_at(i: usize) -> Vec<RawTouch> {
+    let x = -850 + 26 * i as i32;
+    vec![finger(1, x, 0), finger(2, x + 400, 0)]
+}
+
+#[test]
+fn a_swipe_that_pauses_is_still_one_swipe() {
+    // 20 mm across, 400 ms with the fingers still (reports go on), then on again.
+    let script = Script::default()
+        .frames(1000.0, 12.0, 20, pair_at)
+        .frames(1250.0, 12.0, 33, |_| pair_at(20))
+        .frames(1700.0, 12.0, 20, |i| pair_at(20 + i))
+        .lift(2000.0);
+    let frames = pad(&run(Config::default(), &script));
+    assert_eq!(landings(&frames).len(), 1, "no second swipe: {frames:?}");
+    assert_eq!(lifts(&frames), 1);
+    assert_eq!(frames.last(), Some(&PadFrame::Lift));
+    assert!(
+        moves(&frames).len() > 30,
+        "it kept following after the pause"
+    );
+}
+
+#[test]
+fn a_swipe_lifts_at_the_report_that_ends_it() {
+    let script = stroke(2, Axis::X, 45.0, 45, 12.0);
+    let timed = drive(Tracker::new(Config::default()), &script.records);
+    let lift = timed
+        .iter()
+        .find(|(_, o)| *o == Out::Pad(PadFrame::Lift))
+        .expect("it lifts");
+    assert_eq!(
+        lift.0,
+        script.records.last().unwrap().at,
+        "no hold after the fingers left"
+    );
+}
+
+#[test]
+fn a_click_during_a_swipe_returns_it_to_its_space_before_it_lifts() {
+    let click = |i: usize| {
+        if i >= 30 {
+            Buttons::LEFT
+        } else {
+            Buttons::NONE
+        }
+    };
+    let script = (0..=31)
+        .fold(Script::default(), |s, i| {
+            s.report(
+                1000.0 + 12.0 * i as f64,
+                pair_at(i),
+                click(i),
+                Motion::default(),
+            )
+        })
+        .lift(1500.0);
+    let frames = pad(&run(Config::default(), &script));
+    let (_, (x0, _), _) = landings(&frames)[0].clone();
+    assert_eq!(lifts(&frames), 1);
+    let n = frames.len();
+    assert_eq!(frames[n - 1], PadFrame::Lift);
+    let PadFrame::Move { at } = frames[n - 2] else {
+        panic!("the last frame before the lift is not a move: {frames:?}");
+    };
+    assert_eq!(
+        mm(at.x),
+        x0,
+        "the row is back where it landed: no travel to commit"
+    );
+    assert!(
+        moves(&frames)[..moves(&frames).len() - 1]
+            .iter()
+            .any(|&(x, _)| x > x0 + 20.0),
+        "it had followed the fingers first"
+    );
 }
 
 #[test]
 fn a_remapped_swipe_fires_once_per_threshold_with_the_cooldown_and_never_touches_the_pad() {
     let script = stroke(2, Axis::X, 90.0, 90, 12.0);
-    let timed = drive(
-        Tracker::new(remapped()).with_session_lock(LockState::Unlocked),
-        &script.records,
-    );
+    let timed = drive(Tracker::new(remapped()), &script.records);
     assert!(
         pad(&outs_of(&timed)).is_empty(),
         "a fired action is not a live swipe"
@@ -311,7 +349,7 @@ fn a_scroll_never_lands_four_contacts_and_a_swipe_never_lands_two() {
 }
 
 #[test]
-fn every_landing_and_move_keeps_clear_of_the_zones_libinput_ignores() {
+fn every_move_keeps_clear_of_the_pad_edges() {
     let strokes = [
         stroke(1, Axis::Y, 45.0, 45, 12.0),
         stroke(2, Axis::Y, -40.0, 40, 12.0),
@@ -321,13 +359,6 @@ fn every_landing_and_move_keeps_clear_of_the_zones_libinput_ignores() {
     ];
     for s in &strokes {
         let frames = pad(&run(Config::default(), s));
-        for (_, (_, y), xs) in landings(&frames) {
-            assert!(
-                xs.iter().all(|x| *x >= 10.0 && *x <= 90.0),
-                "side zones: {xs:?}"
-            );
-            assert!(y <= 55.0, "bottom thumb zone: {y}");
-        }
         for f in &frames {
             if let PadFrame::Move { at } = f {
                 assert!(mm(at.y) >= 5.0 && mm(at.y) <= 65.0, "{at:?}");

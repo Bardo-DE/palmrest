@@ -1,7 +1,7 @@
 //! The contact set a stroke follows and the one centroid-delta computation.
 
 use crate::gestures::Sample;
-use crate::touch::TouchId;
+use crate::touch::{Point, TouchId};
 
 /// The ids of the running set, sorted, and where each contact was at the last report.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -33,19 +33,15 @@ impl Follow {
     /// The mean displacement of the contacts since the last report, per axis in grid units,
     /// truncated toward zero. `contacts` must be the followed set.
     pub fn delta(self, contacts: &[Sample]) -> (Self, (i32, i32)) {
-        let (sx, sy) = contacts
-            .iter()
-            .map(|c| c.at.delta_from(self.previous(c)))
-            .fold((0, 0), |(x, y), d| (x + d.x, y + d.y));
-        let n = contacts.len().max(1) as i32;
+        let delta = Point::mean(contacts.iter().map(|c| c.at.delta_from(self.previous(c))));
         let next = Self {
             ids: self.ids,
             last: contacts.to_vec(),
         };
-        (next, (sx / n, sy / n))
+        (next, (delta.x, delta.y))
     }
 
-    fn previous(&self, c: &Sample) -> crate::touch::Point {
+    fn previous(&self, c: &Sample) -> Point {
         self.last
             .iter()
             .find(|s| s.id == c.id)

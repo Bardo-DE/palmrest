@@ -1,94 +1,165 @@
 //! A stroke event's outputs: the socket message for the shell's own surfaces, and the virtual
 //! touchpad for every other client. Each sink gets its own feel (`feel::shell`, `feel::pad`)
-//! from the same physical motion.
+//! from the same physical motion. The pad's policy (`Policy`) is the one place that decides
+//! what it may have down; the tracker only hands it the facts.
 
-use super::out::Out;
+use super::out::{Out, Source, action_outs, while_unlocked};
+use super::{Tracker, pad_outs};
+use crate::action::Gesture;
 use crate::config::Count;
 use crate::feel::pad as pad_feel;
-use crate::feel::shell::{self, Carry};
-use crate::gestures::{Intent, StrokeEvent};
-use crate::outputs::pad::Pad;
+use crate::feel::shell;
+use crate::gestures::{Intent, Moment, Motion, StrokeEvent};
+use crate::outputs::pad::{Pad, Policy};
 use crate::time::Mono;
-use palmrest_protocol::{Axis, LockState, Over, Phase, ToHost};
+use palmrest_protocol::{Axis, Phase, ToHost};
 
-/// What decides whether the pad takes a stroke.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Route {
-    /// Who holds the pointer: a scroll is silent on the pad while a host does.
-    pub claimed: Over,
-    /// A Spaces swipe is a desktop action, so it waits for an unlocked session.
-    pub session: LockState,
-    /// Whether the two-finger swipes are the workspace defaults, which the compositor runs live
-    /// from the pad; any other mapping is fired by `SwipeFire` instead.
-    pub live_swipe: bool,
-    /// `scroll.speed`.
-    pub speed: Count,
-}
-
-/// The scroll message of `e` for the shell, if it has one, and the carry after it. A Spaces
-/// swipe is not a scroll: the shell sees it as a gesture that opens and closes without ever
-/// beginning, as it always has.
-pub fn host_scroll(carry: Carry, e: &StrokeEvent, speed: Count, now: Mono) -> (Carry, Option<Out>) {
-    let axis = match e.intent {
-        Some(Intent::Scroll(axis)) => Some(axis),
-        Some(Intent::SpaceSwipe) | None => None,
-    };
-    let carry = if e.phase == Phase::Began {
-        Carry::default()
-    } else {
-        carry
-    };
-    let (carry, (dx_px, dy_px)) = match (e.phase, axis) {
-        (Phase::Changed, Some(Axis::X)) => {
-            let (carry, px) = shell::px(carry, e.motion.x, Axis::X, speed, e.dt_s);
-            (carry, (px as f32, 0.0))
+/// The scroll message of `e` for the shell, if it has one. A Spaces swipe is not a scroll: the
+/// shell sees it as a gesture that opens and closes without ever beginning, as it always has,
+/// so its Began and Changed have no message while its MayBegin and Ended do.
+pub fn host_scroll(e: &StrokeEvent, speed: Count, now: Mono) -> Option<Out> {
+    let (phase, axis, (dx_px, dy_px)) = match e.moment {
+        Moment::Announced => (Phase::MayBegin, None, (0.0, 0.0)),
+        Moment::Began {
+            intent: Intent::Scroll(axis),
+            ..
+        } => (Phase::Began, Some(axis), (0.0, 0.0)),
+        Moment::Changed {
+            intent: Intent::Scroll(axis),
+            motion,
+            dt_s,
+        } => (
+            Phase::Changed,
+            Some(axis),
+            scrolled(axis, motion, speed, dt_s),
+        ),
+        Moment::Began {
+            intent: Intent::SpaceSwipe,
+            ..
         }
-        (Phase::Changed, Some(Axis::Y)) => {
-            let (carry, px) = shell::px(carry, e.motion.y, Axis::Y, speed, e.dt_s);
-            (carry, (0.0, px as f32))
-        }
-        _ => (carry, (0.0, 0.0)),
+        | Moment::Changed {
+            intent: Intent::SpaceSwipe,
+            ..
+        } => return None,
+        Moment::Ended { intent } => (Phase::Ended, scroll_axis(intent), (0.0, 0.0)),
+        Moment::Cancelled { intent } => (Phase::Cancelled, scroll_axis(intent), (0.0, 0.0)),
     };
-    let shown = match e.phase {
-        Phase::MayBegin | Phase::Ended | Phase::Cancelled => true,
-        Phase::Began | Phase::Changed => axis.is_some(),
-    };
-    let out = shown.then_some(Out::Host(ToHost::Scroll {
+    Some(Out::Host(ToHost::Scroll {
         gesture: e.gesture,
-        phase: e.phase,
+        phase,
         dx_px,
         dy_px,
         fingers: e.fingers,
         axis,
         t_ns: now.0,
-    }));
-    (carry, out)
+    }))
+}
+
+/// The axis of a scroll intent.
+fn scroll_axis(intent: Option<Intent>) -> Option<Axis> {
+    match intent {
+        Some(Intent::Scroll(axis)) => Some(axis),
+        Some(Intent::SpaceSwipe) | None => None,
+    }
+}
+
+/// The px a scroll's motion makes on its own axis.
+fn scrolled(axis: Axis, motion: Motion, speed: Count, dt_s: f64) -> (f32, f32) {
+    match axis {
+        Axis::X => (shell::px(motion.x, Axis::X, speed, dt_s) as f32, 0.0),
+        Axis::Y => (0.0, shell::px(motion.y, Axis::Y, speed, dt_s) as f32),
+    }
 }
 
 /// The pad's frames for `e`.
-pub fn pad_step(pad: Pad, e: &StrokeEvent, route: &Route, now: Mono) -> (Pad, Vec<Out>) {
-    let (pad, frames) = match (e.phase, e.intent) {
-        (Phase::Began, Some(intent)) if lands(intent, route) => pad.land(intent, e.motion, now),
-        (Phase::Changed, Some(intent)) => pad.moved(intent, travel(intent, e, route), now),
-        (Phase::Ended | Phase::Cancelled, _) => pad.end(now),
-        _ => (pad, vec![]),
+pub fn pad_step(
+    pad: Pad,
+    e: &StrokeEvent,
+    policy: Policy,
+    speed: Count,
+    now: Mono,
+) -> (Pad, Vec<Out>) {
+    let (pad, frames) = match e.moment {
+        Moment::Began { intent, lead } if policy.allows(intent) => pad.land(intent, lead, now),
+        Moment::Changed { intent, motion, .. } => {
+            pad.moved(intent, travel(intent, motion, speed), now)
+        }
+        Moment::Ended { .. } => pad.end(now),
+        Moment::Cancelled { .. } => pad.cancel(now),
+        Moment::Announced | Moment::Began { .. } => (pad, vec![]),
     };
     (pad, frames.into_iter().map(Out::Pad).collect())
 }
 
-/// Whether a stroke of `intent` puts fingers on the pad now.
-fn lands(intent: Intent, route: &Route) -> bool {
+/// The pad's motion: a scroll's is the fingers' times the speed multiplier, a swipe's is the
+/// fingers' exactly.
+fn travel(intent: Intent, motion: Motion, speed: Count) -> Motion {
     match intent {
-        Intent::Scroll(_) => route.claimed == Over::NotOurs,
-        Intent::SpaceSwipe => route.live_swipe && route.session == LockState::Unlocked,
+        Intent::Scroll(_) => motion.map(|mm| pad_feel::travel(mm, speed)),
+        Intent::SpaceSwipe => motion,
     }
 }
 
-/// The pad's motion: a scroll's is the fingers' times the speed multiplier, a swipe's is the
-/// fingers' exactly.
-fn travel(intent: Intent, e: &StrokeEvent, route: &Route) -> crate::gestures::Motion {
-    match intent {
-        Intent::Scroll(_) => e.motion.map(|mm| pad_feel::travel(mm, route.speed)),
-        Intent::SpaceSwipe => e.motion,
+impl Tracker {
+    /// What the stroke's phases cause: the shell's scroll messages, the touchpad's fingers and,
+    /// for a remapped two-finger swipe, the action it fires.
+    pub(super) fn apply(self, events: &[StrokeEvent], now: Mono) -> (Self, Vec<Out>) {
+        let (s, mut outs) = self.route(events, now);
+        let (s, fired) = s.fire(events, now);
+        outs.extend(fired);
+        (s, outs)
+    }
+
+    fn route(self, events: &[StrokeEvent], now: Mono) -> (Self, Vec<Out>) {
+        let policy = self.policy();
+        let speed = self.cfg.scroll.speed;
+        let mut pad = self.pad;
+        let mut outs = vec![];
+        for e in events {
+            outs.extend(host_scroll(e, speed, now));
+            let (next, drawn) = pad_step(pad, e, policy, speed, now);
+            pad = next;
+            outs.extend(drawn);
+        }
+        (Self { pad, ..self }, outs)
+    }
+
+    /// The action of a remapped two-finger swipe, once per threshold of travel.
+    fn fire(self, events: &[StrokeEvent], now: Mono) -> (Self, Vec<Out>) {
+        let map = &self.cfg.gestures.gesture_action_map;
+        if map.two_finger_swipe_is_live() {
+            return (self, vec![]);
+        }
+        let mut swipe = self.swipe;
+        let mut outs = vec![];
+        for e in events {
+            let (next, fired) = swipe.step(e, now);
+            swipe = next;
+            for dir in fired {
+                let action = map.action_for(Gesture::two_finger_swipe(dir));
+                outs.extend(action_outs(action, Source::Other, self.claimed));
+            }
+        }
+        let outs = while_unlocked(self.session, outs);
+        (Self { swipe, ..self }, outs)
+    }
+
+    /// What the pad may have down under the pointer's holder, the lock screen and the settings.
+    fn policy(&self) -> Policy {
+        Policy {
+            claimed: self.claimed,
+            session: self.session,
+            live_swipe: self
+                .cfg
+                .gestures
+                .gesture_action_map
+                .two_finger_swipe_is_live(),
+        }
+    }
+
+    /// Lifts at once whatever the pad's policy no longer allows (after a claim or a lock).
+    pub(super) fn enforce(self) -> (Self, Vec<Out>) {
+        let (pad, frames) = self.pad.enforce(self.policy());
+        (Self { pad, ..self }, pad_outs(frames))
     }
 }

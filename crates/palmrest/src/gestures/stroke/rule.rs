@@ -22,12 +22,12 @@ impl Threshold {
 }
 
 /// Accumulated sideways motion before the X axis can lock.
-const LOCK_THRESHOLD_X: Um = Um(1538);
+pub(crate) const LOCK_THRESHOLD_X: Um = Um(1538);
 /// Accumulated up or down motion before the Y axis can lock.
-const LOCK_THRESHOLD_Y: Um = Um(571);
+pub(crate) const LOCK_THRESHOLD_Y: Um = Um(571);
 /// How much further one axis must go than the other to lock (1.5).
 const LOCK_RATIO: Fraction = Fraction(1500);
-/// A delta arriving this long after the previous motion unlocks.
+/// A scroll's delta arriving this long after its previous motion unlocks it.
 const LOCK_TIMEOUT: Ms = Ms(250);
 
 /// The rule's tunables in the units the arithmetic uses.

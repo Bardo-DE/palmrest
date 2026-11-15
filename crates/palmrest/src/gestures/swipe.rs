@@ -8,14 +8,15 @@
 //! the direction the fingers moved and starts the count again, so a long drag keeps going after
 //! the cooldown.
 
-use super::stroke::{Event, Intent};
+use super::stroke::{Event, Intent, Moment};
 use crate::config::{Ms, Um};
 use crate::sensor::lattice::{grid, units};
 use crate::sensor::units::Mm;
 use crate::time::Mono;
-use palmrest_protocol::{Axis, Phase};
+use palmrest_protocol::Axis;
 
-/// Horizontal travel that fires.
+/// Horizontal travel that fires: 200 grid units. The same number as `bands::SIDE_BAND_LEFT`, but
+/// not the same fact (a distance to travel against a width of surface), so each keeps its own.
 const THRESHOLD: Um = Um(7692);
 /// The next swipe counts only this long after the last fired.
 const COOLDOWN: Ms = Ms(500);
@@ -38,19 +39,32 @@ pub struct SwipeFire {
 impl SwipeFire {
     /// Consumes one phase of a stroke; returns the direction when the swipe fires.
     pub fn step(self, e: &Event, now: Mono) -> (Self, Option<FingerDirection>) {
-        match (e.phase, e.intent) {
-            (Phase::Began, Some(Intent::SpaceSwipe)) => self.travelled(e.motion.x, 0.0, now),
-            (Phase::Changed, Some(Intent::SpaceSwipe)) => {
-                self.travelled(e.motion.x, self.travel, now)
-            }
-            (Phase::Ended | Phase::Cancelled, _) => (
+        match e.moment {
+            Moment::Began {
+                intent: Intent::SpaceSwipe,
+                lead,
+            } => self.travelled(lead.x, 0.0, now),
+            Moment::Changed {
+                intent: Intent::SpaceSwipe,
+                motion,
+                ..
+            } => self.travelled(motion.x, self.travel, now),
+            Moment::Ended { .. } | Moment::Cancelled { .. } => (
                 Self {
                     travel: 0.0,
                     ..self
                 },
                 None,
             ),
-            _ => (self, None),
+            Moment::Announced
+            | Moment::Began {
+                intent: Intent::Scroll(_),
+                ..
+            }
+            | Moment::Changed {
+                intent: Intent::Scroll(_),
+                ..
+            } => (self, None),
         }
     }
 

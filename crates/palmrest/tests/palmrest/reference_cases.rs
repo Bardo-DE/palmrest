@@ -5,8 +5,8 @@
 use palmrest::Mono;
 use palmrest::action::{Action, Gesture, plan};
 use palmrest::config::{Config, Count};
-use palmrest::feel::shell::{self, Carry};
-use palmrest::gestures::stroke::Threshold;
+use palmrest::feel::shell;
+use palmrest::gestures::stroke::{Moment, Threshold};
 use palmrest::gestures::{
     FingerDirection, Hold, Intent, Params, Recogniser, Sample, StrokeEvent, SwipeFire,
 };
@@ -56,9 +56,13 @@ fn timed(
 fn scrolled(events: &[(Mono, StrokeEvent)]) -> (f64, f64) {
     events
         .iter()
-        .filter(|(_, e)| e.phase == Phase::Changed && matches!(e.intent, Some(Intent::Scroll(_))))
-        .fold((0.0, 0.0), |(h, v), (_, e)| {
-            (h + e.motion.x.0, v + e.motion.y.0)
+        .fold((0.0, 0.0), |(h, v), (_, e)| match e.moment {
+            Moment::Changed {
+                intent: Intent::Scroll(_),
+                motion,
+                ..
+            } => (h + motion.x.0, v + motion.y.0),
+            _ => (h, v),
         })
 }
 
@@ -131,7 +135,7 @@ fn finger_count_change_does_not_jump() {
         events
             .iter()
             .filter(|(at, _)| *at == Mono::from_millis(20_000))
-            .all(|(_, e)| e.phase != Phase::Changed),
+            .all(|(_, e)| e.phase() != Phase::Changed),
         "a new contact set moves nothing"
     );
 }
@@ -143,11 +147,11 @@ fn scroll_steps_are_finer_than_a_detent_tenth() {
     }));
     let steps: Vec<f64> = events
         .iter()
-        .filter(|(_, e)| e.phase == Phase::Changed)
-        .scan(Carry::default(), |carry, (_, e)| {
-            let (next, px) = shell::px(*carry, e.motion.y, Axis::Y, Count(32), e.dt_s);
-            *carry = next;
-            Some(px)
+        .filter_map(|(_, e)| match e.moment {
+            Moment::Changed { motion, dt_s, .. } => {
+                Some(shell::px(motion.y, Axis::Y, Count(32), dt_s))
+            }
+            _ => None,
         })
         .filter(|px| *px != 0.0)
         .collect();
