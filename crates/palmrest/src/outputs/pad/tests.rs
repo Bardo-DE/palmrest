@@ -196,6 +196,32 @@ fn a_short_scroll_holds_its_lift_past_the_tap_timeout() {
     }
 }
 
+/// Measured 2026-11-15: a 50 ms flick held still for the rest of `MIN_DOWN` gave the app no
+/// speed to glide with. Contacts that moved past the tap slop can no longer tap, so a flick lifts
+/// the moment it ends, still moving; a reverse step that runs out of room lands again at once.
+#[test]
+fn a_flick_that_moved_lifts_the_moment_it_ends() {
+    let (pad, _) = Pad::Up.land(DOWN, lead(0.0, 1.0), Mono(0));
+    let (pad, _) = pad.moved(DOWN, lead(0.0, 1.5), Mono::from_millis(11));
+    let (pad, _) = pad.moved(DOWN, lead(0.0, 1.5), Mono::from_millis(22));
+    let (pad, _) = pad.moved(DOWN, lead(0.0, 3.0), Mono::from_millis(33));
+    let (_, frames) = pad.end(Mono::from_millis(50));
+    assert_eq!(frames, [PadFrame::Lift]);
+    let (_, frames) = pad.moved(DOWN, lead(0.0, -20.0), Mono::from_millis(44));
+    assert_eq!(frames[0], PadFrame::Lift, "6 mm moved: it may land again");
+}
+
+/// 2 mm or less from the landing could still be a tap to libinput: the lift waits.
+#[test]
+fn a_scroll_inside_the_tap_slop_still_waits() {
+    let (pad, _) = Pad::Up.land(DOWN, lead(0.0, 1.0), Mono(0));
+    let (pad, _) = pad.moved(DOWN, lead(0.0, 1.0), Mono::from_millis(11));
+    let (pad, _) = pad.moved(DOWN, lead(0.0, 1.0), Mono::from_millis(22));
+    let (pad, frames) = pad.end(Mono::from_millis(50));
+    assert_eq!(frames, []);
+    assert_eq!(pad.deadline(), Some(Mono::from_millis(200)));
+}
+
 #[test]
 fn a_swipe_lifts_the_moment_it_ends_however_young_it_is() {
     let (pad, _) = Pad::Up.land(SWIPE, lead(1.0, 0.0), Mono(0));

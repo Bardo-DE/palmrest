@@ -10,12 +10,15 @@
 //!   stops.
 //!
 //! Contacts land at the decision (never at MayBegin, so a resting finger makes nothing). A
-//! scroll's two contacts never lift before `MIN_DOWN` (`Down::could_tap`): libinput reads two
-//! contacts that go down and up inside its tap timeout without moving as a two-finger tap, a
-//! right click (measured 2026-11-15: a flick's last reverse step re-landed contacts that had just
-//! landed). An ending, cancelled or no longer allowed scroll lifts at `MIN_DOWN`, one out of room
-//! stops at the edge until then, and a new scroll over a pending lift takes the contacts over. A
-//! swipe's lift at once, since libinput only taps with up to three fingers and a held swipe would
+//! scroll's two contacts that have not moved never lift before `MIN_DOWN` (`Down::could_tap`):
+//! libinput reads two contacts that go down and up inside its tap timeout without moving as a
+//! two-finger tap, a right click (measured 2026-11-15: a flick's last reverse step re-landed
+//! contacts that had just landed). Such a scroll that ends, is cancelled or is no longer allowed
+//! lifts at `MIN_DOWN`, one out of room stops at the edge until then, and a new scroll over a
+//! pending lift takes the contacts over. Contacts that moved past libinput's tap slop can no longer
+//! tap and lift at once, so a flick ends while it is still moving and the app's momentum carries
+//! on (measured the same day: holding a 50 ms flick still for the rest of `MIN_DOWN` left the app
+//! nothing to glide with). A swipe's lift at once, since libinput only taps with up to three fingers and a held swipe would
 //! add stationary time to a flick. A cancelled swipe returns to where it landed before it lifts, so
 //! the compositor sees no travel and stays on its Space. `policy` says what may be down at all;
 //! `layout` has the geometry and the libinput zones it keeps clear of.
@@ -31,8 +34,13 @@ use crate::sensor::units::{Mm, MmPoint};
 use crate::time::Mono;
 use serde::{Deserialize, Serialize};
 
-/// How long a scroll's fingers stay down so apps see a stroke.
+/// How long a scroll's contacts that have not moved stay down: past libinput's tap timeout
+/// (180 ms).
 const MIN_DOWN: Ms = Ms(200);
+
+/// How far a contact moves before libinput no longer counts it as a tap: its threshold is 1.3 mm
+/// from where the touch went down, and 2 mm leaves a margin.
+const TAP_SLOP_MM: f64 = 2.0;
 
 /// Pad units per millimetre (resolution of ABS_MT_POSITION_*).
 pub const UNITS_PER_MM: i32 = 40;
@@ -80,6 +88,9 @@ pub struct Down {
     /// Where the contacts were last written: `at`, or for a swipe the mean of `at` and the
     /// position before it (`shown_after`).
     shown: MmPoint,
+    /// Whether the contacts have moved more than `TAP_SLOP_MM` from where they landed, which
+    /// libinput remembers for the rest of the touch: they can no longer be a tap.
+    past_tap_slop: bool,
 }
 
 /// The pad between frames.
@@ -102,9 +113,21 @@ impl Down {
     }
 
     /// Whether lifting these contacts at `now` could read as a tap: a scroll's two contacts
-    /// younger than `MIN_DOWN`. A swipe's four never tap.
+    /// younger than `MIN_DOWN` that have not moved past the tap slop. A swipe's four never tap.
     fn could_tap(&self, now: Mono) -> bool {
-        matches!(self.intent, Intent::Scroll(_)) && now < self.safe_from()
+        matches!(self.intent, Intent::Scroll(_)) && !self.past_tap_slop && now < self.safe_from()
+    }
+
+    /// These contacts moved to `at`, written at `shown`.
+    fn moved_to(self, at: MmPoint, shown: MmPoint) -> Self {
+        let dx = at.x.0 - self.origin.x.0;
+        let dy = at.y.0 - self.origin.y.0;
+        Self {
+            at,
+            shown,
+            past_tap_slop: self.past_tap_slop || dx.hypot(dy) > TAP_SLOP_MM,
+            ..self
+        }
     }
 
     /// A pending lift of these contacts, at the earliest moment it is not a tap.
@@ -142,14 +165,15 @@ impl Pad {
                 origin: at,
                 at,
                 shown: at,
+                past_tap_slop: false,
             }),
             lifted.into_iter().chain([land]).collect(),
         )
     }
 
     /// Moves the contacts of a stroke of `intent` by `by`, in pad millimetres. A scroll that
-    /// runs out of room lands again on the opposite side, unless its contacts are younger than
-    /// `MIN_DOWN`: then they stop at the edge like a swipe's. Nothing moves when nothing of that
+    /// runs out of room lands again on the opposite side, unless its contacts could still tap:
+    /// then they stop at the edge like a swipe's. Nothing moves when nothing of that
     /// intent is down.
     pub fn moved(self, intent: Intent, by: Motion, now: Mono) -> (Self, Vec<PadFrame>) {
         match self {
@@ -158,7 +182,7 @@ impl Pad {
                     layout::Next::Within(at) => {
                         let shown = shown_after(intent, down.at, at);
                         (
-                            Pad::Down(Down { at, shown, ..down }),
+                            Pad::Down(down.moved_to(at, shown)),
                             vec![PadFrame::Move { at: point(shown) }],
                         )
                     }
@@ -168,11 +192,7 @@ impl Pad {
                         let at = layout::held(intent, down.at, by);
                         let moved = (at != down.at).then(|| PadFrame::Move { at: point(at) });
                         (
-                            Pad::Down(Down {
-                                at,
-                                shown: at,
-                                ..down
-                            }),
+                            Pad::Down(down.moved_to(at, at)),
                             moved.into_iter().collect(),
                         )
                     }
@@ -183,8 +203,8 @@ impl Pad {
         }
     }
 
-    /// The stroke Ended. A swipe lifts now. A scroll lifts now, or at `landed + MIN_DOWN` if it
-    /// is younger than that: one older has outlived the tap timeout whatever it moved.
+    /// The stroke Ended. A swipe lifts now. A scroll lifts now, still moving so the app's
+    /// momentum carries on, or at `landed + MIN_DOWN` if its contacts could still tap.
     pub fn end(self, now: Mono) -> (Self, Vec<PadFrame>) {
         match self {
             Pad::Down(down) if down.could_tap(now) => (down.lifting(), vec![]),

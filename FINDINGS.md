@@ -89,6 +89,12 @@ the earliest, and a new scroll over a pending lift takes the contacts over. Two 
 immediate: a Spaces swipe starting over a pending scroll lift (it needs four contacts of its
 own) and a disconnect (the mouse is gone); neither has been seen to tap.
 
+**Momentum after a flick (measured 2026-11-15).** With every young scroll held to `MIN_DOWN`, a
+50 ms flick sat still for 100-120 ms before its lift, so apps saw no speed at the stroke's stop
+and did not glide. libinput stops counting a touch as a tap once it moves 1.3 mm, so the rule is
+now age and travel: contacts that moved more than 2 mm (`TAP_SLOP_MM`) lift the moment the stroke
+ends, still moving; only contacts that barely moved wait out the tap timeout.
+
 **Back while scrolling sideways is the one-finger flick (2026-11-15).** The same capture showed
 Alt+Left at the end of two fast horizontal scrolls. A horizontal stroke with two fingers is the
 Spaces swipe, so those were one-finger strokes, and a quick one-finger flick is Back/Forward
