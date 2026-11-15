@@ -138,19 +138,27 @@ pub enum Next {
 /// The centre after moving by `by`: along the stroke's axis only. A scroll that runs out of
 /// room must land again; a swipe never does, it stops at the edge.
 pub fn advance(intent: Intent, at: MmPoint, by: Motion) -> Next {
-    let span = travel_span(intent);
-    let (from, delta) = match axis(intent) {
+    let (from, delta) = along(intent, at, by);
+    match intent {
+        Intent::Scroll(_) if !travel_span(intent).contains(from + delta) => Next::OutOfRoom,
+        Intent::Scroll(_) | Intent::SpaceSwipe => Next::Within(held(intent, at, by)),
+    }
+}
+
+/// The centre after moving by `by` along the stroke's axis, stopped at the edge of its travel.
+pub fn held(intent: Intent, at: MmPoint, by: Motion) -> MmPoint {
+    let (from, delta) = along(intent, at, by);
+    let to = Mm(travel_span(intent).clamp(from + delta));
+    match axis(intent) {
+        Axis::X => MmPoint { x: to, ..at },
+        Axis::Y => MmPoint { y: to, ..at },
+    }
+}
+
+/// Where the centre is and how far `by` moves it, along the stroke's axis.
+fn along(intent: Intent, at: MmPoint, by: Motion) -> (f64, f64) {
+    match axis(intent) {
         Axis::X => (at.x.0, by.x.0),
         Axis::Y => (at.y.0, by.y.0),
-    };
-    let want = from + delta;
-    let along = match intent {
-        Intent::SpaceSwipe => span.clamp(want),
-        Intent::Scroll(_) if span.contains(want) => want,
-        Intent::Scroll(_) => return Next::OutOfRoom,
-    };
-    Next::Within(match axis(intent) {
-        Axis::X => MmPoint { x: Mm(along), ..at },
-        Axis::Y => MmPoint { y: Mm(along), ..at },
-    })
+    }
 }

@@ -77,6 +77,15 @@ over mean step) fell from 0.37 to 0.29 for about 5 ms of lag, with the travel un
 is casement's: it drives the Spaces with libinput's accelerated swipe delta, which enlarges what
 is left (an unaccelerated 37.6 became 57.9); the shell brief asks for the unaccelerated delta.
 
+**Right clicks while scrolling (measured 2026-11-15).** Tap-to-click is on for touchpads, and
+libinput reads two contacts that go down and up without moving inside its 180 ms tap timeout as
+a two-finger tap: a right click (Zen opened its context menu). A scroll's landing edge leaves
+little room behind it (none for a vertical scroll, 5 mm for a horizontal one), so the small
+reverse step at the end of a flick re-landed the contacts, and the next reverse step re-landed
+the new ones before they moved. Contacts younger than `MIN_DOWN` now stop at the edge instead of
+landing again (`outputs/pad`, `layout::held`). Other paths still lift young contacts at once (a
+claim, a lock, a new stroke over a pending lift, a disconnect); none has been seen to tap.
+
 **Device checks for the pad strokes (open).**
 - libinput's scroll ratio in numbers: screen px per mm of finger for a slow and a fast stroke
   (a real trackpad gives about 12 px/mm); `scroll.speed` is the only knob.

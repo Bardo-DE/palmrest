@@ -103,6 +103,33 @@ fn a_scroll_out_of_room_lands_again_on_the_opposite_side() {
     assert_eq!(relanded.1, 5.0, "still moving down: back near the top");
 }
 
+/// Measured 2026-11-15: at the end of a flick the fingers eased back, the contacts that had
+/// just landed again ran out of room at once and lifted without moving, and libinput read a
+/// two-finger tap (a right click). Young contacts stop at the edge instead.
+#[test]
+fn young_contacts_never_lift_to_land_again() {
+    let (pad, _) = Pad::Up.land(DOWN, lead(0.0, 1.0), Mono(0));
+    let (pad, frames) = pad.moved(DOWN, lead(0.0, -3.0), Mono::from_millis(20));
+    assert_eq!(
+        frames,
+        [],
+        "already at the top edge: nothing moves and nothing lifts"
+    );
+    let (pad, frames) = pad.moved(DOWN, lead(0.0, 2.0), Mono::from_millis(30));
+    assert_eq!(
+        frames,
+        [PadFrame::Move {
+            at: PadPoint { x: 2000, y: 280 }
+        }]
+    );
+    let (_, frames) = pad.moved(DOWN, lead(0.0, -9.0), Mono::from_millis(250));
+    assert_eq!(
+        frames[0],
+        PadFrame::Lift,
+        "past the tap timeout it lands again as before"
+    );
+}
+
 #[test]
 fn a_swipe_follows_x_only_and_stops_at_the_edge() {
     let row = |x_mm: f64| PadFrame::Move {

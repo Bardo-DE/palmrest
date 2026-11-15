@@ -10,7 +10,10 @@
 //!   stops.
 //!
 //! Contacts land at the decision (never at MayBegin, so a resting finger makes nothing). A
-//! scroll's are held down until `MIN_DOWN` so libinput's tap timeout has passed; a swipe's lift
+//! scroll's are held down until `MIN_DOWN` so libinput's tap timeout has passed, and are not
+//! lifted to land again before then either (measured 2026-11-15: a flick's last reverse step
+//! re-landed contacts that had just landed, and libinput read the pair as a two-finger tap, a
+//! right click). A swipe's lift
 //! at once, since libinput only taps with up to three fingers and a held swipe would add
 //! stationary time to a flick. A cancelled swipe returns to where it landed before it lifts, so
 //! the compositor sees no travel and stays on its Space. `policy` says what may be down at all;
@@ -116,8 +119,9 @@ impl Pad {
     }
 
     /// Moves the contacts of a stroke of `intent` by `by`, in pad millimetres. A scroll that
-    /// runs out of room lands again on the opposite side; a swipe stops at the edge. Nothing
-    /// moves when nothing of that intent is down.
+    /// runs out of room lands again on the opposite side, unless its contacts are younger than
+    /// `MIN_DOWN`: then they stop at the edge like a swipe's. Nothing moves when nothing of that
+    /// intent is down.
     pub fn moved(self, intent: Intent, by: Motion, now: Mono) -> (Self, Vec<PadFrame>) {
         match self {
             Pad::Down(down) if down.intent == intent => {
@@ -127,6 +131,20 @@ impl Pad {
                         (
                             Pad::Down(Down { at, shown, ..down }),
                             vec![PadFrame::Move { at: point(shown) }],
+                        )
+                    }
+                    // Young contacts that lifted without moving would be a tap to libinput,
+                    // and two fingers tapping is a right click: they wait at the edge instead.
+                    layout::Next::OutOfRoom if now < down.landed.after(MIN_DOWN.duration()) => {
+                        let at = layout::held(intent, down.at, by);
+                        let moved = (at != down.at).then(|| PadFrame::Move { at: point(at) });
+                        (
+                            Pad::Down(Down {
+                                at,
+                                shown: at,
+                                ..down
+                            }),
+                            moved.into_iter().collect(),
                         )
                     }
                     layout::Next::OutOfRoom => self.land(intent, by, now),
