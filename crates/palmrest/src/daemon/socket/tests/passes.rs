@@ -152,6 +152,8 @@ fn a_user_switch_closes_the_connection_of_the_one_who_left() {
     seat_file(&s.dir, Some(me() + 1));
     assert_eq!(s.server.look_at_seat(), Some(me() + 1));
     assert_eq!(s.server.subscribers(), 0);
+    // What was sent before the switch is still readable; after it, the end of the stream.
+    let _greeting = queued(&shell);
     let mut buf = [0u8; 8];
     assert_eq!(
         rustix::net::recv(&shell, &mut buf, RecvFlags::DONTWAIT).map(|(n, _)| n),
